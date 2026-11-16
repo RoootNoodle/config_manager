@@ -1,0 +1,108 @@
+{
+  "config_version": 1,
+  "device_ID": "8574655FD2B55DF0FFBDC496B91CEF5F",
+  "name": "MIOT-Gateway",
+  "MQTT_URL": "mqtts://your-server.com:8883",
+  "OTA_URL": "https://your-server.com/ota",
+  "gps_enabled": false,
+  "configure_units": {
+    "MIOT_Level_Sensor": 298,
+    "MIOT_Power_Sensor": 299,
+    "MIOT_Temperature_Sensor": 303
+  },
+  "units": {
+    "unit_1": {
+      "unit_name": "Level Sensor",
+      "unit_address": 10,
+      "unit_default_address": 10,
+      "unit_wifi_interval": 5,
+      "unit_NB-IOT_interval": 300,
+      "unit_manufacturer": "MIOT",
+      "unit_type": "MIOT_Level_Sensor",
+      "IO_config": {
+        "level": {
+          "IO_name": "level",
+          "IO_unit": "mm",
+          "IO_read_address": 100,
+          "IO_start_byte": 0,
+          "IO_length": 4,
+          "IO_value_type": "FP32",
+          "IO_function_code": [3],
+          "IO_endian": "big",
+          "min": 0,
+          "max": 5000,
+          "accuracy": 1
+        }
+      }
+    },
+    "unit_2": {
+      "unit_name": "Power Meter",
+      "unit_address": 20,
+      "unit_default_address": 20,
+      "unit_wifi_interval": 10,
+      "unit_NB-IOT_interval": 600,
+      "unit_manufacturer": "MIOT",
+      "unit_type": "MIOT_Power_Sensor",
+      "IO_config": {
+        "voltage": {
+          "IO_name": "voltage",
+          "IO_unit": "V",
+          "IO_read_address": 200,
+          "IO_start_byte": 0,
+          "IO_length": 4,
+          "IO_value_type": "FP32",
+          "IO_function_code": [4],
+          "IO_endian": "big",
+          "min": 0,
+          "max": 500,
+          "accuracy": 1
+        },
+        "current": {
+          "IO_name": "current",
+          "IO_unit": "A",
+          "IO_read_address": 202,
+          "IO_start_byte": 0,
+          "IO_length": 4,
+          "IO_value_type": "FP32",
+          "IO_function_code": [4],
+          "IO_endian": "big",
+          "min": 0,
+          "max": 100,
+          "accuracy": 2
+        },
+        "relay": {
+          "IO_name": "relay",
+          "IO_unit": "",
+          "IO_read_address": 210,
+          "IO_start_byte": 0,
+          "IO_length": 2,
+          "IO_value_type": "UINT16",
+          "IO_function_code": [3, 6]
+        }
+      }
+    },
+    "unit_3": {
+      "unit_name": "Temperature Sensor",
+      "unit_address": 30,
+      "unit_default_address": 30,
+      "unit_wifi_interval": 30,
+      "unit_NB-IOT_interval": 900,
+      "unit_manufacturer": "MIOT",
+      "unit_type": "MIOT_Temperature_Sensor",
+      "IO_config": {
+        "temperature": {
+          "IO_name": "temperature",
+          "IO_unit": "°C",
+          "IO_read_address": 300,
+          "IO_start_byte": 0,
+          "IO_length": 2,
+          "IO_value_type": "INT16",
+          "IO_endian": "big",
+          "accuracy": 1,
+          "min": -40,
+          "max": 85
+        }
+      }
+    }
+  }
+}

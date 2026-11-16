@@ -1,0 +1,38 @@
+menu "Config Manager Configuration"
+
+    config CONFIG_MANAGER_FILE_PATH
+        string "Config file path"
+        default "/spiffs/config.json"
+        help
+            Full VFS path of the gateway config JSON. Any VFS file system works (SPIFFS, LittleFS, FAT);
+            the application mounts it before calling config_manager_load().
+            Must start with '/' and be at most 63 characters.
+
+    choice CONFIG_MANAGER_ALLOC
+        prompt "Heap placement for the parsed config and JSON buffers"
+        default CONFIG_MANAGER_ALLOC_PREFER_SPIRAM
+
+        config CONFIG_MANAGER_ALLOC_PREFER_SPIRAM
+            bool "Prefer external RAM (PSRAM) if available"
+            help
+                With CONFIG_SPIRAM enabled, allocate from PSRAM and fall back to internal RAM.
+                Without PSRAM (e.g. ESP32-C6) this is plain malloc().
+
+        config CONFIG_MANAGER_ALLOC_INTERNAL
+            bool "Internal RAM only"
+    endchoice
+
+    config CONFIG_MANAGER_MAX_UNITS
+        int "Maximum Modbus units"
+        default 15
+        range 1 64
+        help
+            Units beyond this count are ignored when the config is parsed. Sets the size of the
+            units[] array embedded in system_config_t.
+
+    config CONFIG_MANAGER_MAX_CONFIGURE_UNITS
+        int "Maximum configure_units entries"
+        default 20
+        range 1 64
+
+endmenu
