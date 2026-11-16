@@ -1,0 +1,21 @@
+# ESP-IDF build output and generated config (library root and test apps)
+build/
+# test/build is the device compile-check app, not build output
+!test/build/
+managed_components/
+dependencies.lock
+sdkconfig
+sdkconfig.old
+
+# Python
+__pycache__/
+*.pyc
+
+# Editors / OS
+.vscode/
+.idea/
+.clangd/
+compile_commands.json
+.DS_Store
+*~
+*.swp

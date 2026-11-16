@@ -1,0 +1,11 @@
+version: "1.0.0"
+description: Versioned gateway configuration (schema v1) for MIOT gateways - parse, hashes, sync, partial updates, live values
+url: https://github.com/RoootNoodle/config_manager
+targets:
+  - esp32c6
+  - esp32c5
+  # linux: host tests only
+  - linux
+dependencies:
+  idf: ">=6.0.0"
+  espressif/cjson: "^1.7.1"

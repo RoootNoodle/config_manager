@@ -1,0 +1,183 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "MIOT Gateway Configuration Schema",
+    "description": "Schema for MIOT Gateway device configuration",
+    "type": "object",
+  "required": ["config_version", "device_ID", "name", "units"],
+    "properties": {
+      "config_version": {
+        "type": "integer",
+        "description": "Configuration version number, increments on local changes",
+        "minimum": 1
+      },
+      "device_ID": {
+        "type": "string",
+        "description": "Unique device identifier (typically from eFuse)"
+      },
+      "name": {
+        "type": "string",
+        "description": "Device name",
+        "default": "MIOT-Gateway"
+      },
+      "MQTT_URL": {
+        "type": ["string", "null"],
+        "description": "MQTT broker URL (null if not configured)"
+      },
+      "OTA_URL": {
+        "type": ["string", "null"],
+        "description": "OTA update server URL (null if not configured)"
+      },
+      "gps_enabled": {
+        "type": "boolean",
+        "description": "Enable or disable GNSS acquisition",
+        "default": false
+      },
+      "configure_units": {
+        "type": "object",
+        "description": "Mapping of sensor types to their Modbus address register. Used during configuration mode to identify and assign addresses to new devices.",
+        "additionalProperties": {
+          "type": "integer",
+          "description": "Modbus register address (decimal) that holds the unit address for this sensor type",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "examples": [
+          {
+            "MIOT_Level_Sensor": 298,
+            "MIOT_Power_Sensor": 299,
+            "MIOT_Temperature_Sensor": 303
+          }
+        ]
+      },
+      "units": {
+        "type": "object",
+        "description": "Object containing all connected Modbus units",
+        "additionalProperties": {
+          "$ref": "#/definitions/unit"
+        }
+      }
+    },
+    "definitions": {
+      "unit": {
+        "type": "object",
+      "required": ["unit_name", "unit_address", "unit_default_address", "unit_wifi_interval", "unit_NB-IOT_interval", "IO_config"],
+        "properties": {
+          "unit_name": {
+            "type": "string",
+            "description": "Name of the unit"
+          },
+        "unit_address": {
+          "type": "integer",
+          "description": "Current Modbus slave address assigned to this unit (2-247)",
+          "minimum": 2,
+          "maximum": 247
+        },
+          "unit_default_address": {
+            "type": "integer",
+          "description": "Default/factory Modbus slave address (2-200)",
+            "minimum": 2,
+            "maximum": 200
+          },
+        "unit_wifi_interval": {
+          "type": "integer",
+          "description": "Update interval in seconds when connected via WiFi",
+          "minimum": 1
+        },
+        "unit_NB-IOT_interval": {
+            "type": "integer",
+          "description": "Update interval in seconds when connected via NB-IoT (typically longer to save data)",
+          "minimum": 1
+          },
+          "unit_manufacturer": {
+            "type": ["string", "null"],
+            "description": "Manufacturer of the unit (optional)"
+          },
+          "unit_type": {
+            "type": ["string", "null"],
+            "description": "Sensor type identifier matching a key in configure_units (e.g., MIOT_Level_Sensor)"
+          },
+          "IO_config": {
+            "type": "object",
+            "description": "Object containing all I/O configurations for this unit",
+            "additionalProperties": {
+              "$ref": "#/definitions/io"
+            }
+          }
+        }
+      },
+      "io": {
+        "type": "object",
+        "required": ["IO_read_address", "IO_start_byte", "IO_length", "IO_value_type", "IO_name", "IO_unit"],
+        "description": "If IO_function_code is omitted the firmware defaults to FC3 (read) and FC6 (write) for backwards compatibility with older configs.",
+        "properties": {
+          "IO_function_code": {
+            "type": "array",
+            "description": "List of Modbus function codes used by this I/O. Omit entirely to use legacy defaults (FC3 read + FC6 write). Read codes (1-4) and write codes (5,6,15,16) are non-overlapping, so the firmware infers direction from the value. Read codes: 1 (Read Coils), 2 (Read Discrete Inputs), 3 (Read Holding Registers), 4 (Read Input Registers). Write codes: 5 (Write Single Coil), 6 (Write Single Register), 15 (Write Multiple Coils), 16 (Write Multiple Registers).",
+            "items": {
+              "type": "integer",
+              "enum": [1, 2, 3, 4, 5, 6, 15, 16]
+            },
+            "minItems": 1,
+            "maxItems": 2,
+            "uniqueItems": true,
+            "examples": [
+              [3],
+              [6],
+              [3, 6],
+              [4],
+              [5],
+              [1, 5]
+            ]
+          },
+          "IO_read_address": {
+            "type": "integer",
+            "description": "Modbus register address to read from",
+            "minimum": 0,
+            "maximum": 65535
+          },
+          "IO_start_byte": {
+            "type": "integer",
+            "description": "Starting byte position in the register data",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "IO_length": {
+            "type": "integer",
+            "description": "Number of bytes to read",
+            "minimum": 1,
+            "maximum": 8
+          },
+          "IO_value_type": {
+            "type": "string",
+            "description": "Data type of the value",
+            "enum": ["FP32", "INT16", "UINT16", "INT32", "UINT32"]
+          },
+          "IO_name": {
+            "type": "string",
+            "description": "Display name of the I/O"
+          },
+          "IO_unit": {
+            "type": "string",
+            "description": "Unit of measurement (can be empty string)"
+          },
+          "min": {
+            "type": "number",
+            "description": "Minimum expected value for this I/O (optional)"
+          },
+          "max": {
+            "type": "number",
+            "description": "Maximum expected value for this I/O (optional)"
+          },
+          "accuracy": {
+            "type": "number",
+            "description": "Decimal precision for displaying the value (optional)"
+          },
+          "IO_endian": {
+            "type": "string",
+            "description": "Byte order for multi-byte values. 'big' (default, Modbus standard) or 'little'. Omitting this field defaults to big-endian.",
+            "enum": ["big", "little"]
+          }
+        }
+      }
+    }
+  }
