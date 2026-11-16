@@ -101,7 +101,9 @@ The body is a piece of the file in the same shape (JSON Merge Patch, RFC 7396):
 - An object merges into the stored object, key by key.
 - Any other value replaces the stored value. Arrays (`f`) are replaced whole.
 - `null` deletes the key.
-- `v` is required and must be higher than the stored version. Otherwise nothing changes and the gateway answers with its current state.
+- `v` is required and must be higher than the stored version.
+  - Equal to the stored version: treated as a duplicate delivery (QoS 1 redelivery). Nothing changes, no `err`; the next `state` is the plain state, unless the first delivery's result has not been published yet, in which case that result (its changed units) is still reported. A *different* patch that reuses the stored `v` is ignored the same way and shows up to Web only as a hash mismatch, so Web must never reuse a `v`.
+  - Lower or missing: rejected with `"err":"v"`; nothing changes.
 
 | Change | Body | Bytes |
 |---|---|---|
@@ -116,7 +118,7 @@ The body is a piece of the file in the same shape (JSON Merge Patch, RFC 7396):
 
 What the gateway does:
 
-1. Parse the body. Reject it when `v` is not higher, or a key is unknown.
+1. Parse the body. Ignore it when `v` equals the stored version. Reject it when `v` is lower or missing, or a key is unknown.
 2. Load the stored file and merge.
 3. Validate the result as a complete v2 file. If it is invalid, keep the old file and report `err`.
 4. Write the file, rebuild the in-memory config, recompute the hashes of the units that changed and the root hash.
@@ -134,8 +136,8 @@ Live values of units that did not change are kept across a patch. Units that cha
 |---|---|
 | `v` | version now stored |
 | `h` | root hash |
-| `u` | unit hashes. After a patch: the units that changed (`null` for a deleted one). After a sync mismatch: all units. On connect: left out. |
-| `err` | present when a patch was rejected; `v` and `h` then describe the unchanged config |
+| `u` | unit hashes. After a patch: the units that changed (`null` for a deleted one); left out when no unit changed. After a sync mismatch: all units. On connect: left out. |
+| `err` | present when a patch was rejected; `v` and `h` then describe the unchanged config. Short codes: `q` quota, `v` version lower or missing, `inv` invalid (bad JSON, unknown key, invalid result), `mem` out of memory, `fs` file read or write failed. |
 
 ### `v2/cfg/sync`
 
@@ -194,6 +196,8 @@ The library does not convert v1 files. The v2 file has its own path, so the v1 f
 3. The server sees the hash differs from its copy and sends the full config on `v2/cfg/set`.
 4. After the file is saved and reloaded without error, the library deletes the v1 file (`CONFIG_CONFIG_MANAGER_V1_FILE_PATH`; empty disables this).
 
+**Unreadable file.** A v2 file that cannot be used (not JSON, truncated, empty, fails validation, over the quota, wrong schema) is handled like a missing one, but only in RAM: the library logs a warning and runs on the default (`"v":0`, no units). The device ID is the `id` of the bad file if it is still readable JSON (`id`, or `device_ID` of a v1 file), otherwise the device ID of the config that was in RAM, otherwise `""`. The bad file is not overwritten or deleted. Step 2 then publishes a hash the server does not match, the server sends the full config, `apply_patch` merges it onto the default (its `v` is above 0) and writes the file. Until then the gateway has no units.
+
 **Between the firmware update and step 3 the gateway has no units and reads no sensors.** Web must speak v2 before v2 firmware is rolled out. If the new firmware is rolled back before step 4, the v1 file is still there.
 
 ### What Web converts
@@ -214,7 +218,7 @@ The library does not convert v1 files. The v2 file has its own path, so the v1 f
 1. Keep the v2 config per gateway. Display data (units of measurement, limits, accuracy, manufacturer) stays in the Web database and is not sent.
 2. For every change, send the smallest `set` that describes it and increase `v` by one.
 3. Compute the unit and root hash as in section 5 and compare with the `state` that comes back. A different `h` means the patch did not produce what Web expected: send `sync`, read the unit hashes, resend the units that differ.
-4. On `err`, nothing was changed on the gateway. Show the text to the user.
+4. On `err`, nothing was changed on the gateway. Show the meaning of the code to the user (`q`, `v`, `inv`, `mem`, `fs`, see `v2/cfg/state`).
 5. Never reuse a unit key. A deleted unit's key stays retired, because rules and history refer to it.
 6. Send `sync` on a schedule and after a gateway comes online. It costs about 30 B when nothing differs.
 7. A gateway publishes on `v2/cfg/state` only when it runs v2 firmware. Use that to decide which format to send.
@@ -248,7 +252,7 @@ Web keeps the last `caps` per gateway and uses it to:
 2. Block a change that would go over a limit, before sending anything.
 3. Split a config larger than `msg` into several `set` messages.
 
-The gateway checks the same limits. A `set` whose result goes over them is rejected with `"err":"quota"` and the stored config stays as it was. So a wrong number in Web cannot overload a gateway.
+The gateway checks the same limits. A `set` whose result goes over them is rejected with `"err":"q"` and the stored config stays as it was. So a wrong number in Web cannot overload a gateway.
 
 The numbers come from Kconfig in each firmware project, so each board gets values that fit its RAM:
 
@@ -309,7 +313,7 @@ The unit name (`n`) and type (`ty`) are not kept in RAM; they are read from the 
 
 ### Tests (host)
 
-Parsing with every default; rejection of unknown keys, of v1 files, and of a missing or bad `f`; patch of one value, add and delete of IO and unit, rejected patch leaving the file intact, stale `v`, a patch over the unit, IO or size quota; hashes against the Python reference, including "default written out" equals "default left out"; state after a patch and after a sync mismatch; get; removal of the v1 file; `find_unit`.
+Parsing with every default; rejection of unknown keys, of v1 files, and of a missing or bad `f`; patch of one value, add and delete of IO and unit, rejected patch leaving the file intact, lower `v`, duplicate `v` (ignored, no `err`), state without `u` when no unit changed, a patch over the unit, IO or size quota; hashes against the Python reference, including "default written out" equals "default left out"; state after a patch and after a sync mismatch; get; removal of the v1 file; `find_unit`.
 
 ### Files
 

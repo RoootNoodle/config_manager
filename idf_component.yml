@@ -1,5 +1,6 @@
-version: "1.0.0"
-description: Versioned gateway configuration (schema v1) for MIOT gateways - parse, hashes, sync, partial updates, live values
+# REVIEW: major version follows CONFIG_MANAGER_SCHEMA_VERSION (2).
+version: "2.0.0"
+description: Versioned gateway configuration (schema v2) for MIOT gateways - parse, merge patch, hashes, state/sync/get payloads, quotas, live values
 url: https://github.com/RoootNoodle/config_manager
 targets:
   - esp32c6

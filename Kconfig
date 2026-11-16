@@ -1,12 +1,21 @@
 menu "Config Manager Configuration"
 
+    # REVIEW: v2 gets its own file so the v1 file stays on flash until a v2 config has been saved.
     config CONFIG_MANAGER_FILE_PATH
         string "Config file path"
-        default "/spiffs/config.json"
+        default "/spiffs/config_v2.json"
         help
-            Full VFS path of the gateway config JSON. Any VFS file system works (SPIFFS, LittleFS, FAT);
+            Full VFS path of the gateway config JSON (schema v2). Any VFS file system works (SPIFFS, LittleFS, FAT);
             the application mounts it before calling config_manager_load().
             Must start with '/' and be at most 63 characters.
+
+    # REVIEW: v1 file deleted after the first successful v2 save or patch (plan section 6).
+    config CONFIG_MANAGER_V1_FILE_PATH
+        string "v1 config file to delete after a v2 config is saved"
+        default "/spiffs/config.json"
+        help
+            Path of the schema v1 config file. After a v2 config has been saved and loaded without error,
+            this file is deleted. Leave empty to never delete anything. At most 63 characters.
 
     choice CONFIG_MANAGER_ALLOC
         prompt "Heap placement for the parsed config and JSON buffers"
@@ -22,17 +31,39 @@ menu "Config Manager Configuration"
             bool "Internal RAM only"
     endchoice
 
+    # REVIEW: units over the limit are now rejected with "quota" instead of ignored.
     config CONFIG_MANAGER_MAX_UNITS
         int "Maximum Modbus units"
         default 15
         range 1 64
         help
-            Units beyond this count are ignored when the config is parsed. Sets the size of the
-            units[] array embedded in system_config_t.
+            Most units in a config. A config or patch with more is rejected (quota). Sets the size of the
+            units[] array embedded in system_config_t. Reported as cfg.u in v2/caps.
 
     config CONFIG_MANAGER_MAX_CONFIGURE_UNITS
-        int "Maximum configure_units entries"
+        int "Maximum cu (sensor type) entries"
         default 20
         range 1 64
+        help
+            Most entries in cu. A config or patch with more is rejected (quota). Reported as cfg.cu in v2/caps.
+
+    # REVIEW: new quota; 120 fits the 50 kB load/update budget on the ESP32-C6 (plan section 7).
+    config CONFIG_MANAGER_MAX_IOS
+        int "Maximum IOs, all units together"
+        default 120
+        range 1 4096
+        help
+            Most IOs over all units. A config or patch with more is rejected (quota). Reported as cfg.io in v2/caps.
+            The ESP32-C5 with PSRAM (MIOT_GW_NTN) is planned at 600.
+
+    # REVIEW: new quota; the peak RAM of a load or update is about 8.5x this (plan section 7).
+    config CONFIG_MANAGER_MAX_FILE_SIZE
+        int "Maximum config file size (bytes of compact JSON)"
+        default 5800
+        range 256 262144
+        help
+            Largest config file in bytes of compact JSON. A config or patch whose result is larger is rejected
+            (quota). Each save or patch allocates a buffer of this size. Reported as cfg.b in v2/caps.
+            The ESP32-C5 with PSRAM (MIOT_GW_NTN) is planned at 28000.
 
 endmenu

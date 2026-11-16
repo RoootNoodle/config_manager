@@ -4,15 +4,20 @@
 #include "unity_fixture.h"
 #include "test_helpers.h"
 
-// Independent reference over schemas/v1/config_example.json:
-// sha256(json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
-#define H_UNIT_1  "309caa4a01ceb4a39de84bb7b870ed40f0b22c1de2ec7daa35a15faab29b8a6c"
-#define H_UNIT_2  "d15d6ad323dce36f0ddf7ce6e677852ce643f22a4a26ea910e414c90d08ac3fe"
-#define H_UNIT_3  "afef79c61d452e5d4353d6b552097e54d0ae9617d2c5220e8a265dfd5cff5120"
-#define H_CU      "e6715cf0d7228d4fc5d521f7484b0e7911ce0d72671040d8c35b698943bcbdef"
-#define H_SYSTEM  "5d52554a9400927c81ea7709273e808474894e4e3b5a9bc1dffade77975cad55"
+// REVIEW: golden values from test/hash_reference.py (plan section 5) over schemas/v2/config_example.json.
+#define H_ROOT    "eee9ed4c"
+#define H_UNIT_1  "e9193bf6"
+#define H_UNIT_2  "a9f85125"
+#define H_UNIT_3  "c1ac7114"
 
-#define SYNC_PREFIX "{\"config_version\":1,\"configure_units_hash\":\"" H_CU "\",\"units_hash\":"
+// Escaping, UTF-8, gps 1, unit key "10" before "2", empty io, all write codes; computed the same way.
+#define C2_JSON "{\"s\":2,\"v\":1,\"id\":\"ID-\xC3\xA9\",\"n\":\"Tank \\\"A\\\" \xC2\xB0" "C\\\\x\",\"gps\":1," \
+                "\"cu\":{\"Zeta\":5,\"Alpha\":7},\"u\":{\"10\":{\"n\":\"Ten\\ttab\\u0001\",\"a\":2,\"io\":{" \
+                "\"b\":{\"r\":2,\"t\":\"bool\",\"f\":[1,5]},\"a\":{\"r\":1,\"t\":\"i32\",\"f\":[15],\"b\":2,\"l\":8}}}," \
+                "\"2\":{\"n\":\"Two\",\"a\":3,\"io\":{}}}}"
+#define C2_ROOT    "02ca0ec3"
+#define C2_UNIT_10 "73357223"
+#define C2_UNIT_2  "5dcf6d80"
 
 TEST_GROUP(hash);
 
@@ -24,76 +29,90 @@ TEST_SETUP(hash)
 
 TEST_TEAR_DOWN(hash) { test_env_teardown(); }
 
-TEST(hash, matches_canonical_form)
+static void assert_hex(const char *expected, uint32_t hash)
 {
-    const system_config_t *cfg = config_manager_get_ptr();
-    TEST_ASSERT_EQUAL_STRING(H_SYSTEM, cfg->system_hash);
-    TEST_ASSERT_EQUAL_STRING(H_CU, cfg->configure_units_hash);
-    config_manager_release();
-
-    cJSON *hashes = config_manager_get_all_unit_hashes();
-    TEST_ASSERT_NOT_NULL(hashes);
-    TEST_ASSERT_EQUAL(3, cJSON_GetArraySize(hashes));
-    TEST_ASSERT_EQUAL_STRING(H_UNIT_1, cJSON_GetStringValue(cJSON_GetObjectItem(hashes, "unit_1")));
-    TEST_ASSERT_EQUAL_STRING(H_UNIT_2, cJSON_GetStringValue(cJSON_GetObjectItem(hashes, "unit_2")));
-    TEST_ASSERT_EQUAL_STRING(H_UNIT_3, cJSON_GetStringValue(cJSON_GetObjectItem(hashes, "unit_3")));
-    cJSON_Delete(hashes);
-
-    char cu[MAX_HASH_LEN];
-    TEST_ASSERT_EQUAL(ESP_OK, config_manager_compute_configure_units_hash(cu));
-    TEST_ASSERT_EQUAL_STRING(H_CU, cu);
+    char hex[9];
+    snprintf(hex, sizeof(hex), "%08x", (unsigned)hash);
+    TEST_ASSERT_EQUAL_STRING(expected, hex);
 }
 
-TEST(hash, independent_of_key_order)
+TEST(hash, matches_python_reference)
 {
-    // Same unit_3 as the example with keys in a different order
+    const system_config_t *cfg = config_manager_get_ptr();
+    assert_hex(H_ROOT, cfg->hash);
+    assert_hex(H_UNIT_1, cfg->units[0].hash);
+    assert_hex(H_UNIT_2, cfg->units[1].hash);
+    assert_hex(H_UNIT_3, cfg->units[2].hash);
+    config_manager_release();
+
+    TEST_ASSERT_EQUAL(ESP_OK, config_manager_save(C2_JSON));
+    cfg = config_manager_get_ptr();
+    assert_hex(C2_ROOT, cfg->hash);
+    TEST_ASSERT_EQUAL_UINT8(2, cfg->units[0].key);
+    assert_hex(C2_UNIT_2, cfg->units[0].hash);
+    assert_hex(C2_UNIT_10, cfg->units[1].hash);
+    config_manager_release();
+}
+
+TEST(hash, default_written_out_equals_left_out)
+{
+    // The example with every default written out, keys in another order and f unsorted
     TEST_ASSERT_EQUAL(ESP_OK, config_manager_save(
-        "{\"units\":{\"unit_3\":{\"IO_config\":{\"temperature\":{\"max\":85,\"min\":-40,\"accuracy\":1,"
-        "\"IO_endian\":\"big\",\"IO_value_type\":\"INT16\",\"IO_length\":2,\"IO_start_byte\":0,"
-        "\"IO_read_address\":300,\"IO_unit\":\"\xC2\xB0" "C\",\"IO_name\":\"temperature\"}},"
-        "\"unit_type\":\"MIOT_Temperature_Sensor\",\"unit_manufacturer\":\"MIOT\",\"unit_NB-IOT_interval\":900,"
-        "\"unit_wifi_interval\":30,\"unit_default_address\":30,\"unit_address\":30,"
-        "\"unit_name\":\"Temperature Sensor\"}},\"config_version\":1}"));
-    cJSON *hashes = config_manager_get_all_unit_hashes();
-    TEST_ASSERT_EQUAL_STRING(H_UNIT_3, cJSON_GetStringValue(cJSON_GetObjectItem(hashes, "unit_3")));
-    cJSON_Delete(hashes);
-}
-
-TEST(hash, sync_in_sync)
-{
-    TEST_ASSERT_FALSE(config_manager_handle_sync(
-        SYNC_PREFIX "{\"unit_1\":\"" H_UNIT_1 "\",\"unit_2\":\"" H_UNIT_2 "\",\"unit_3\":\"" H_UNIT_3 "\"}}"));
-}
-
-TEST(hash, sync_out_of_sync)
-{
-    TEST_ASSERT_TRUE(config_manager_handle_sync("{\"config_version\":2}"));
-    TEST_ASSERT_TRUE(config_manager_handle_sync(
-        SYNC_PREFIX "{\"unit_1\":\"x\",\"unit_2\":\"" H_UNIT_2 "\",\"unit_3\":\"" H_UNIT_3 "\"}}"));
-    TEST_ASSERT_TRUE(config_manager_handle_sync(
-        SYNC_PREFIX "{\"unit_1\":\"" H_UNIT_1 "\",\"unit_2\":\"" H_UNIT_2 "\"}}"));
-    TEST_ASSERT_TRUE(config_manager_handle_sync(
-        SYNC_PREFIX "{\"unit_1\":\"" H_UNIT_1 "\",\"unit_2\":\"" H_UNIT_2 "\",\"unit_3\":\"" H_UNIT_3 "\",\"unit_9\":\"y\"}}"));
-    TEST_ASSERT_TRUE(config_manager_handle_sync(
-        SYNC_PREFIX "{\"unit_1\":42,\"unit_2\":\"" H_UNIT_2 "\",\"unit_3\":\"" H_UNIT_3 "\"}}"));
-    TEST_ASSERT_TRUE(config_manager_handle_sync("{\"configure_units_hash\":\"zzz\"}"));
-    TEST_ASSERT_FALSE(config_manager_handle_sync("nope"));
-}
-
-TEST(hash, sync_delete_units)
-{
-    TEST_ASSERT_TRUE(config_manager_handle_sync("{\"delete_units\":[\"unit_2\",\"unit_missing\"]}"));
+        "{\"u\":{"
+        "\"3\":{\"io\":{\"temperature\":{\"e\":\"b\",\"l\":2,\"b\":0,\"f\":[3],\"t\":\"i16\",\"r\":300}},"
+        "\"c\":900,\"w\":30,\"a\":30,\"ty\":\"MIOT_Temperature_Sensor\",\"n\":\"Temperature Sensor\"},"
+        "\"2\":{\"n\":\"Power Meter\",\"ty\":\"MIOT_Power_Sensor\",\"a\":20,\"w\":10,\"c\":600,\"io\":{"
+        "\"relay\":{\"r\":210,\"t\":\"u16\",\"f\":[6,3],\"b\":0,\"l\":2,\"e\":\"b\"},"
+        "\"voltage\":{\"r\":200,\"t\":\"f32\",\"f\":[4],\"l\":4},"
+        "\"current\":{\"r\":202,\"t\":\"f32\",\"f\":[4],\"e\":\"b\"}}},"
+        "\"1\":{\"n\":\"Level Sensor\",\"ty\":\"MIOT_Level_Sensor\",\"a\":10,\"w\":5,\"c\":300,"
+        "\"io\":{\"level\":{\"r\":100,\"t\":\"f32\",\"f\":[3],\"b\":0,\"l\":4,\"e\":\"b\"}}}},"
+        "\"cu\":{\"MIOT_Temperature_Sensor\":303,\"MIOT_Power_Sensor\":299,\"MIOT_Level_Sensor\":298},"
+        "\"gps\":0,\"n\":\"MIOT-Gateway\",\"id\":\"8574655FD2B55DF0FFBDC496B91CEF5F\",\"v\":7,\"s\":2}"));
     const system_config_t *cfg = config_manager_get_ptr();
-    TEST_ASSERT_EQUAL(2, cfg->unit_count);
-    TEST_ASSERT_EQUAL_STRING("unit_3", cfg->units[1].name);
+    assert_hex(H_ROOT, cfg->hash);   // v is not part of the root hash
+    assert_hex(H_UNIT_1, cfg->units[0].hash);
+    assert_hex(H_UNIT_2, cfg->units[1].hash);
+    assert_hex(H_UNIT_3, cfg->units[2].hash);
     config_manager_release();
+}
+
+TEST(hash, sync)
+{
+    TEST_ASSERT_FALSE(config_manager_handle_sync("{\"v\":1,\"h\":\"" H_ROOT "\"}"));
+    // Only h is compared
+    TEST_ASSERT_FALSE(config_manager_handle_sync("{\"v\":5,\"h\":\"" H_ROOT "\"}"));
+    TEST_ASSERT_TRUE(config_manager_handle_sync("{\"v\":1,\"h\":\"00000000\"}"));
+    TEST_ASSERT_TRUE(config_manager_handle_sync("{\"v\":1,\"h\":\"EEE9ED4C\"}"));
+    // Malformed: ignored
+    TEST_ASSERT_FALSE(config_manager_handle_sync("{\"v\":1}"));
+    TEST_ASSERT_FALSE(config_manager_handle_sync("{\"v\":1,\"h\":5}"));
+    TEST_ASSERT_FALSE(config_manager_handle_sync("nope"));
+    TEST_ASSERT_FALSE(config_manager_handle_sync(NULL));
+}
+
+TEST(hash, state_on_connect_and_after_sync_mismatch)
+{
+    cJSON *state = config_manager_build_state(false);
+    TEST_ASSERT_NOT_NULL(state);
+    char *s = cJSON_PrintUnformatted(state);
+    TEST_ASSERT_EQUAL_STRING("{\"s\":2,\"v\":1,\"h\":\"" H_ROOT "\"}", s);
+    cJSON_free(s);
+    cJSON_Delete(state);
+
+    TEST_ASSERT_TRUE(config_manager_handle_sync("{\"v\":1,\"h\":\"12345678\"}"));
+    state = config_manager_build_state(true);
+    s = cJSON_PrintUnformatted(state);
+    TEST_ASSERT_EQUAL_STRING("{\"s\":2,\"v\":1,\"h\":\"" H_ROOT "\",\"u\":{\"1\":\"" H_UNIT_1 "\",\"2\":\""
+                             H_UNIT_2 "\",\"3\":\"" H_UNIT_3 "\"}}", s);
+    cJSON_free(s);
+    cJSON_Delete(state);
 }
 
 TEST_GROUP_RUNNER(hash)
 {
-    RUN_TEST_CASE(hash, matches_canonical_form);
-    RUN_TEST_CASE(hash, independent_of_key_order);
-    RUN_TEST_CASE(hash, sync_in_sync);
-    RUN_TEST_CASE(hash, sync_out_of_sync);
-    RUN_TEST_CASE(hash, sync_delete_units);
+    RUN_TEST_CASE(hash, matches_python_reference);
+    RUN_TEST_CASE(hash, default_written_out_equals_left_out);
+    RUN_TEST_CASE(hash, sync);
+    RUN_TEST_CASE(hash, state_on_connect_and_after_sync_mismatch);
 }

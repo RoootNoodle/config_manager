@@ -15,22 +15,22 @@ import sys
 import jsonschema
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SCHEMA_VERSION = 1
+# REVIEW: v2 drops every pass-through field; the parser reads (or hashes) every key the schema defines.
+SCHEMA_VERSION = 2
 
 # Per schema level: fields read by the C parser / fields only stored in the JSON file
 FIELDS = {
     "root": {
-        "parsed": {"config_version", "device_ID", "name", "units", "configure_units"},
-        "passthrough": {"MQTT_URL", "OTA_URL", "gps_enabled"},
+        "parsed": {"s", "v", "id", "n", "gps", "cu", "u"},
+        "passthrough": set(),
     },
     "unit": {
-        "parsed": {"unit_address", "unit_wifi_interval", "unit_NB-IOT_interval", "IO_config"},
-        "passthrough": {"unit_name", "unit_default_address", "unit_manufacturer", "unit_type"},
+        "parsed": {"n", "ty", "a", "w", "c", "io"},
+        "passthrough": set(),
     },
     "io": {
-        "parsed": {"IO_function_code", "IO_read_address", "IO_start_byte", "IO_length",
-                   "IO_value_type", "IO_name", "IO_endian"},
-        "passthrough": {"IO_unit", "min", "max", "accuracy"},
+        "parsed": {"r", "t", "f", "b", "l", "e"},
+        "passthrough": set(),
     },
 }
 

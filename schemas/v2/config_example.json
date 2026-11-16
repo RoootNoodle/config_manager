@@ -1,0 +1,44 @@
+{
+  "s": 2,
+  "v": 1,
+  "id": "8574655FD2B55DF0FFBDC496B91CEF5F",
+  "n": "MIOT-Gateway",
+  "cu": {
+    "MIOT_Level_Sensor": 298,
+    "MIOT_Power_Sensor": 299,
+    "MIOT_Temperature_Sensor": 303
+  },
+  "u": {
+    "1": {
+      "n": "Level Sensor",
+      "ty": "MIOT_Level_Sensor",
+      "a": 10,
+      "w": 5,
+      "io": {
+        "level": {"r": 100, "t": "f32", "f": [3]}
+      }
+    },
+    "2": {
+      "n": "Power Meter",
+      "ty": "MIOT_Power_Sensor",
+      "a": 20,
+      "w": 10,
+      "c": 600,
+      "io": {
+        "voltage": {"r": 200, "t": "f32", "f": [4]},
+        "current": {"r": 202, "t": "f32", "f": [4]},
+        "relay": {"r": 210, "t": "u16", "f": [3, 6]}
+      }
+    },
+    "3": {
+      "n": "Temperature Sensor",
+      "ty": "MIOT_Temperature_Sensor",
+      "a": 30,
+      "w": 30,
+      "c": 900,
+      "io": {
+        "temperature": {"r": 300, "t": "i16", "f": [3]}
+      }
+    }
+  }
+}
