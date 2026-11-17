@@ -5,6 +5,7 @@
 #include "unity_fixture.h"
 #include "test_helpers.h"
 #include "config_manager_priv.h"
+#include "cm_alloc.h"
 
 // REVIEW: expected hashes after each patch come from test/hash_reference.py with an RFC 7396 merge in Python.
 #define H_ROOT_0 "eee9ed4c"
@@ -139,6 +140,8 @@ TEST(update, rejected_patch_leaves_file_intact)
         {"{\"v\":2,\"u\":{\"1\":{\"unit_name\":\"x\"}}}", ESP_ERR_INVALID_ARG, "inv"},
         {"{\"v\":2,\"u\":{\"1\":{\"io\":{\"level\":{\"IO_name\":\"x\"}}}}}", ESP_ERR_INVALID_ARG, "inv"},
         {"{\"v\":2,\"u\":{\"unit_1\":null}}", ESP_ERR_INVALID_ARG, "inv"},
+        // REVIEW: finding 4: an IO name that would break the sense/control topic
+        {"{\"v\":2,\"u\":{\"1\":{\"io\":{\"a/b\":{\"r\":1,\"t\":\"u16\",\"f\":[3]}}}}}", ESP_ERR_INVALID_ARG, "inv"},
         // REVIEW: lower or missing v is rejected with "v"; an equal v is a duplicate (test duplicate_version).
         {"{\"v\":0,\"n\":\"X\"}", ESP_ERR_INVALID_VERSION, "v"},
         {"{\"n\":\"X\"}", ESP_ERR_INVALID_VERSION, "v"},
@@ -217,19 +220,87 @@ TEST(update, quota)
     cJSON_Delete(limits);
 }
 
-TEST(update, full_config_as_patch)
+#define FULL_V9 "{\"s\":2,\"v\":9,\"id\":\"8574655FD2B55DF0FFBDC496B91CEF5F\",\"n\":\"Pump house\",\"gps\":0," \
+    "\"cu\":{\"MIOT_Level_Sensor\":298,\"MIOT_Power_Sensor\":299,\"MIOT_Temperature_Sensor\":303}," \
+    "\"u\":{\"1\":{\"n\":\"Level Sensor\",\"ty\":\"MIOT_Level_Sensor\",\"a\":10,\"w\":5,\"c\":300," \
+    "\"io\":{\"level\":{\"r\":100,\"t\":\"f32\",\"f\":[3,16]}}}," \
+    "\"2\":{\"n\":\"Power Meter\",\"ty\":\"MIOT_Power_Sensor\",\"a\":20,\"w\":10,\"c\":900,\"io\":{" \
+    "\"voltage\":{\"r\":200,\"t\":\"f32\",\"f\":[4]},\"current\":{\"r\":202,\"t\":\"f32\",\"f\":[4]}," \
+    "\"power\":{\"r\":204,\"t\":\"f32\",\"f\":[4]}}}," \
+    "\"4\":{\"n\":\"Flow\",\"a\":40,\"io\":{\"flow\":{\"r\":1,\"t\":\"u32\",\"f\":[4],\"e\":\"l\"}}}}}"
+
+// Example-derived full file at version v, after the patch sequence of patch_sequence (caller free())
+static char *full_file(int v, bool with_cu)
 {
-    // Every key, null for the units to drop
+    char *out = malloc(sizeof(FULL_V9) + 8);
+    TEST_ASSERT_NOT_NULL(out);
+    const char *rest = strchr(FULL_V9, ',') + 1;   // after "s":2,
+    rest = strchr(rest, ',');                       // after "v":9
+    snprintf(out, sizeof(FULL_V9) + 8, "{\"s\":2,\"v\":%d%s", v, rest);
+    if (!with_cu) {
+        char *cu = strstr(out, ",\"cu\":{");
+        char *end = strchr(cu + 1, '}') + 1;
+        memmove(cu, end, strlen(end) + 1);
+    }
+    return out;
+}
+
+// REVIEW: a body with "s" replaces the whole file: units it leaves out are deleted (null in the state), nothing is merged.
+TEST(update, full_file_replaces)
+{
+    TEST_ASSERT_EQUAL(ESP_OK, config_manager_set_live_value(1, "level", 7.0f));
     assert_state("{\"s\":2,\"v\":9,\"h\":\"92004fc0\",\"u\":{\"1\":\"4f439e5e\",\"2\":\"3439f1f5\",\"3\":null,\"4\":\"69b5eded\"}}",
-        patch("{\"s\":2,\"v\":9,\"id\":\"8574655FD2B55DF0FFBDC496B91CEF5F\",\"n\":\"Pump house\",\"gps\":0,"
-              "\"cu\":{\"MIOT_Level_Sensor\":298,\"MIOT_Power_Sensor\":299,\"MIOT_Temperature_Sensor\":303},"
-              "\"u\":{\"1\":{\"n\":\"Level Sensor\",\"ty\":\"MIOT_Level_Sensor\",\"a\":10,\"w\":5,\"c\":300,"
-              "\"io\":{\"level\":{\"r\":100,\"t\":\"f32\",\"f\":[3,16]}}},"
-              "\"2\":{\"n\":\"Power Meter\",\"ty\":\"MIOT_Power_Sensor\",\"a\":20,\"w\":10,\"c\":900,\"io\":{"
-              "\"voltage\":{\"r\":200,\"t\":\"f32\",\"f\":[4]},\"current\":{\"r\":202,\"t\":\"f32\",\"f\":[4]},"
-              "\"power\":{\"r\":204,\"t\":\"f32\",\"f\":[4]},\"relay\":null}},"
-              "\"3\":null,"
-              "\"4\":{\"n\":\"Flow\",\"a\":40,\"io\":{\"flow\":{\"r\":1,\"t\":\"u32\",\"f\":[4],\"e\":\"l\"}}}}}", ESP_OK));
+                 patch(FULL_V9, ESP_OK));
+    TEST_ASSERT_EQUAL(-1, config_manager_find_unit(3));
+    float f = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, config_manager_get_live_value(1, "level", &f));
+    TEST_ASSERT_TRUE(isnan(f));   // unit 1 changed
+
+    // Same content with a higher v: no unit changed, so no "u" and live values are kept
+    TEST_ASSERT_EQUAL(ESP_OK, config_manager_set_live_value(4, "flow", 3.5f));
+    char *body = full_file(10, true);
+    assert_state("{\"s\":2,\"v\":10,\"h\":\"92004fc0\"}", patch(body, ESP_OK));
+    free(body);
+    TEST_ASSERT_EQUAL(ESP_OK, config_manager_get_live_value(4, "flow", &f));
+    TEST_ASSERT_EQUAL_FLOAT(3.5f, f);
+
+    // v rules are the same as for a patch: equal is a duplicate, lower is "v"
+    body = full_file(10, false);
+    assert_state("{\"s\":2,\"v\":10,\"h\":\"92004fc0\"}", patch(body, ESP_OK));
+    free(body);
+    body = full_file(3, true);
+    assert_state("{\"s\":2,\"v\":10,\"h\":\"92004fc0\",\"err\":\"v\"}", patch(body, ESP_ERR_INVALID_VERSION));
+    free(body);
+
+    // Not merged: the same file without cu clears cu
+    body = full_file(11, false);
+    cJSON_Delete(patch(body, ESP_OK));
+    free(body);
+    const system_config_t *cfg = config_manager_get_ptr();
+    TEST_ASSERT_EQUAL(0, cfg->configure_unit_count);
+    TEST_ASSERT_EQUAL(3, cfg->unit_count);
+    config_manager_release();
+
+    // Rejected, file untouched: s other than 2, a null unit (not allowed in a full file), unknown key, incomplete file
+    char *before = read_text_file(CONFIG_MANAGER_FILE_PATH);
+    static const char *const bad[] = {
+        "{\"s\":3,\"v\":12,\"id\":\"d\",\"n\":\"g\",\"u\":{}}",
+        "{\"s\":\"2\",\"v\":12,\"id\":\"d\",\"n\":\"g\",\"u\":{}}",
+        "{\"s\":null,\"v\":12,\"id\":\"d\",\"n\":\"g\",\"u\":{}}",
+        "{\"s\":2,\"v\":12,\"id\":\"d\",\"n\":\"g\",\"u\":{\"3\":null}}",
+        "{\"s\":2,\"v\":12,\"id\":\"d\",\"n\":\"g\",\"u\":{},\"x\":1}",
+        "{\"s\":2,\"v\":12,\"n\":\"g\"}",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        cJSON *state = patch(bad[i], ESP_ERR_INVALID_ARG);
+        TEST_ASSERT_EQUAL_STRING_MESSAGE("inv", state_str(state, "err"), bad[i]);
+        TEST_ASSERT_EQUAL(11, cJSON_GetObjectItem(state, "v")->valueint);
+        cJSON_Delete(state);
+        char *after = read_text_file(CONFIG_MANAGER_FILE_PATH);
+        TEST_ASSERT_EQUAL_STRING_MESSAGE(before, after, bad[i]);
+        free(after);
+    }
+    free(before);
 }
 
 TEST(update, live_values_across_patch)
@@ -401,14 +472,166 @@ TEST(update, invalid_or_empty_file_falls_back_to_default)
     TEST_ASSERT_EQUAL(ESP_OK, config_manager_load());
     TEST_ASSERT_EQUAL(1, config_manager_get_version());
 
-    // Empty file, nothing in RAM: no ID known
+    // Empty file, nothing in RAM: the last device ID the library had is kept
     config_manager_unload();
     write_text_file(CONFIG_MANAGER_FILE_PATH, "");
     TEST_ASSERT_EQUAL(ESP_OK, config_manager_load());
-    assert_fallback("");
+    assert_fallback("GW-7");
     char *file = read_text_file(CONFIG_MANAGER_FILE_PATH);
     TEST_ASSERT_EQUAL_STRING("", file);   // not overwritten with the default
     free(file);
+}
+
+// REVIEW: finding 1: a file over MAX_FILE_SIZE is refused before allocating and handled as unusable.
+TEST(update, oversized_file_falls_back)
+{
+    // A valid v2 file padded with spaces: only its size makes it unusable
+    char *example = read_text_file(EXAMPLE_JSON);
+    size_t len = strlen(example);
+    char *big = malloc(CONFIG_CONFIG_MANAGER_MAX_FILE_SIZE + 2);
+    TEST_ASSERT_NOT_NULL(big);
+    memset(big, ' ', CONFIG_CONFIG_MANAGER_MAX_FILE_SIZE + 1);
+    memcpy(big, example, len);
+    big[CONFIG_CONFIG_MANAGER_MAX_FILE_SIZE + 1] = '\0';
+    free(example);
+    write_text_file(CONFIG_MANAGER_FILE_PATH, big);
+    config_manager_unload();
+    TEST_ASSERT_EQUAL(ESP_OK, config_manager_load());
+    assert_fallback("8574655FD2B55DF0FFBDC496B91CEF5F");   // last ID the library had
+    char *file = read_text_file(CONFIG_MANAGER_FILE_PATH);
+    TEST_ASSERT_EQUAL_STRING(big, file);   // kept
+    free(file);
+    free(big);
+}
+
+// REVIEW: finding 3: while the file is unusable, get/data answer from the default that h describes.
+TEST(update, get_answers_from_fallback)
+{
+    write_text_file(CONFIG_MANAGER_FILE_PATH, "{\"s\":2,\"v\":5,\"id\":\"GW-7\",\"n\":\"g\",\"u\":{\"1\":{\"n\":\"x\"}}}");
+    TEST_ASSERT_EQUAL(ESP_OK, config_manager_load());
+    assert_fallback("GW-7");
+
+    char *payload = config_manager_get_payload("{}");
+    TEST_ASSERT_EQUAL_STRING("{\"s\":2,\"v\":0,\"id\":\"GW-7\",\"n\":\"MIOT-Gateway\",\"u\":{}}", payload);
+    free(payload);
+    payload = config_manager_get_payload("{\"u\":[\"1\"],\"cu\":1}");
+    TEST_ASSERT_EQUAL_STRING("{\"s\":2,\"v\":0,\"u\":{},\"cu\":{}}", payload);
+    free(payload);
+    TEST_ASSERT_NULL(config_manager_get_unit_json(1));
+    cJSON *root = config_manager_get_config_json();
+    TEST_ASSERT_EQUAL(0, cJSON_GetObjectItem(root, "v")->valueint);
+    TEST_ASSERT_EQUAL(0, cJSON_GetArraySize(cJSON_GetObjectItem(root, "u")));
+    cJSON_Delete(root);
+
+    // After the full config is saved, get answers from the file again
+    char *full = example_as_patch(6);
+    cJSON_Delete(patch(full, ESP_OK));
+    free(full);
+    cJSON *u = config_manager_get_unit_json(1);
+    TEST_ASSERT_EQUAL_STRING("Level Sensor", cJSON_GetStringValue(cJSON_GetObjectItem(u, "n")));
+    cJSON_Delete(u);
+}
+
+// REVIEW: finding 2: a reload that fails after a rejected patch is retried, and the pending err is still published.
+TEST(update, failed_reload_recovers)
+{
+    // Allocations of a rejected patch: 1 snapshot, 2 file text; the 3rd is the reload's file text
+    cm_alloc_fail_nth = 3;
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, config_manager_apply_patch("{\"v\":2,\"u\":{\"1\":{\"a\":1}}}"));
+    cm_alloc_fail_nth = 0;
+    TEST_ASSERT_NULL(config_manager_get_ptr());   // the reload really failed
+
+    assert_state("{\"s\":2,\"v\":1,\"h\":\"" H_ROOT_0 "\",\"err\":\"inv\"}", config_manager_build_state(false));
+    const system_config_t *cfg = config_manager_get_ptr();
+    TEST_ASSERT_NOT_NULL(cfg);
+    TEST_ASSERT_EQUAL(3, cfg->unit_count);
+    config_manager_release();
+
+    // The same through apply_patch: no ESP_ERR_INVALID_STATE
+    cm_alloc_fail_nth = 3;
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, config_manager_apply_patch("{\"v\":2,\"u\":{\"1\":{\"a\":1}}}"));
+    cm_alloc_fail_nth = 0;
+    TEST_ASSERT_NULL(config_manager_get_ptr());
+    TEST_ASSERT_EQUAL(ESP_OK, config_manager_apply_patch("{\"v\":2,\"u\":{\"2\":{\"c\":900}}}"));
+    assert_state("{\"s\":2,\"v\":2,\"h\":\"ec2fd0c1\",\"u\":{\"2\":\"57c9a537\"}}", config_manager_build_state(false));
+
+    // A deliberate unload is not undone
+    config_manager_unload();
+    TEST_ASSERT_NULL(config_manager_build_state(false));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, config_manager_apply_patch("{\"v\":3}"));
+}
+
+// REVIEW: finding 5c: a pending err is kept in the sync-mismatch state, which lists all units.
+TEST(update, err_in_full_state)
+{
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_VERSION, config_manager_apply_patch("{\"n\":\"x\"}"));
+    assert_state("{\"s\":2,\"v\":1,\"h\":\"" H_ROOT_0 "\",\"u\":{\"1\":\"e9193bf6\",\"2\":\"a9f85125\",\"3\":\"" H_UNIT_3
+                 "\"},\"err\":\"v\"}", config_manager_build_state(true));
+    // Reported once
+    assert_state("{\"s\":2,\"v\":1,\"h\":\"" H_ROOT_0 "\"}", config_manager_build_state(false));
+}
+
+// REVIEW: config_manager_is_fallback() and config_manager_copy_string() (user-approved additions).
+TEST(update, is_fallback_and_copy_string)
+{
+    TEST_ASSERT_FALSE(config_manager_is_fallback());
+    char buf[40];
+    TEST_ASSERT_EQUAL(ESP_OK, config_manager_copy_string("name", buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("MIOT-Gateway", buf);
+    TEST_ASSERT_EQUAL(ESP_OK, config_manager_copy_string("device_ID", buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("8574655FD2B55DF0FFBDC496B91CEF5F", buf);
+    TEST_ASSERT_EQUAL(ESP_OK, config_manager_copy_string("name", buf, 13));   // exact fit
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_SIZE, config_manager_copy_string("name", buf, 12));
+    TEST_ASSERT_EQUAL_STRING("", buf);
+    strcpy(buf, "x");
+    TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, config_manager_copy_string("n", buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("", buf);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, config_manager_copy_string("name", NULL, 4));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, config_manager_copy_string("name", buf, 0));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, config_manager_copy_string(NULL, buf, sizeof(buf)));
+
+    write_text_file(CONFIG_MANAGER_FILE_PATH, "{broken");
+    TEST_ASSERT_EQUAL(ESP_OK, config_manager_load());
+    TEST_ASSERT_TRUE(config_manager_is_fallback());
+    TEST_ASSERT_EQUAL(ESP_OK, config_manager_copy_string("device_ID", buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("8574655FD2B55DF0FFBDC496B91CEF5F", buf);
+    char *full = example_as_patch(1);   // the full file with "s" repairs it
+    cJSON_Delete(patch(full, ESP_OK));
+    free(full);
+    TEST_ASSERT_FALSE(config_manager_is_fallback());
+
+    config_manager_unload();
+    TEST_ASSERT_FALSE(config_manager_is_fallback());
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, config_manager_copy_string("name", buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("", buf);
+}
+
+// REVIEW: live values by unit key (user-approved additions).
+TEST(update, live_values_by_key)
+{
+    float f = 1;
+    TEST_ASSERT_EQUAL(ESP_OK, config_manager_get_live_value(2, "voltage", &f));
+    TEST_ASSERT_TRUE(isnan(f));
+    TEST_ASSERT_EQUAL(ESP_OK, config_manager_set_live_value(2, "voltage", 1.5f));
+    TEST_ASSERT_EQUAL(ESP_OK, config_manager_get_live_value(2, "voltage", &f));
+    TEST_ASSERT_EQUAL_FLOAT(1.5f, f);
+    TEST_ASSERT_EQUAL_FLOAT(1.5f, config_get_live_value("voltage", (uint8_t)config_manager_find_unit(2)));
+
+    TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, config_manager_set_live_value(9, "voltage", 1));
+    TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, config_manager_get_live_value(9, "voltage", &f));
+    TEST_ASSERT_TRUE(isnan(f));
+    TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, config_manager_get_live_value(2, "level", &f));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, config_manager_set_live_value(2, NULL, 1));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, config_manager_get_live_value(2, "voltage", NULL));
+
+    // Deleting unit 1 moves unit 2 to index 0; the key still finds it
+    cJSON_Delete(patch("{\"v\":2,\"u\":{\"1\":null}}", ESP_OK));
+    TEST_ASSERT_EQUAL(ESP_OK, config_manager_get_live_value(2, "voltage", &f));
+    TEST_ASSERT_EQUAL_FLOAT(1.5f, f);
+
+    config_manager_unload();
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, config_manager_set_live_value(2, "voltage", 1));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, config_manager_get_live_value(2, "voltage", &f));
 }
 
 TEST_GROUP_RUNNER(update)
@@ -417,10 +640,16 @@ TEST_GROUP_RUNNER(update)
     RUN_TEST_CASE(update, duplicate_version);
     RUN_TEST_CASE(update, rejected_patch_leaves_file_intact);
     RUN_TEST_CASE(update, quota);
-    RUN_TEST_CASE(update, full_config_as_patch);
+    RUN_TEST_CASE(update, full_file_replaces);
     RUN_TEST_CASE(update, live_values_across_patch);
     RUN_TEST_CASE(update, get_payload_and_unit_json);
     RUN_TEST_CASE(update, v1_file_removed_after_v2_save);
     RUN_TEST_CASE(update, corrupt_file_falls_back_to_default);
     RUN_TEST_CASE(update, invalid_or_empty_file_falls_back_to_default);
+    RUN_TEST_CASE(update, oversized_file_falls_back);
+    RUN_TEST_CASE(update, get_answers_from_fallback);
+    RUN_TEST_CASE(update, failed_reload_recovers);
+    RUN_TEST_CASE(update, err_in_full_state);
+    RUN_TEST_CASE(update, is_fallback_and_copy_string);
+    RUN_TEST_CASE(update, live_values_by_key);
 }

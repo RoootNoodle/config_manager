@@ -27,7 +27,7 @@ The design, the MQTT messages and the reasons behind v2 are in [V2_PLAN.md](V2_P
 |---|---|---|---|---|
 | root | `s` | schema version, always 2 | required | |
 | root | `v` | config version, whole number >= 0 | required | `version` |
-| root | `id` | device ID | required | `device_id` (truncated to 39 bytes) |
+| root | `id` | device ID; no `/`, `+`, `#` or control characters | required | `device_id` (truncated to 39 bytes) |
 | root | `n` | gateway name, at most 39 bytes | required | `name` |
 | root | `gps` | 0 or 1 | 0 | `gps_enabled` |
 | root | `cu` | sensor type -> register 0–65535 | empty | `configure_units[]` (sorted by name, type truncated to 39 bytes) |
@@ -37,7 +37,7 @@ The design, the MQTT messages and the reasons behind v2 are in [V2_PLAN.md](V2_P
 | unit | `a` | Modbus address 2–247 | required | `address` |
 | unit | `w` | WiFi interval, seconds, 1–65535 | 60 | `wifi_interval_s` |
 | unit | `c` | NB-IoT interval, seconds, 1–65535 | 300 | `nbiot_interval_s` |
-| unit | `io` | IOs; the key is the name, 1–31 bytes | required (may be empty) | `io_pool[]`, sorted by name |
+| unit | `io` | IOs; the key is the name, 1–31 bytes, no `/`, `+`, `#` or control characters (0x00–0x1F, 0x7F) | required (may be empty) | `io_pool[]`, sorted by name |
 | IO | `r` | register 0–65535 | required | `read_addr` |
 | IO | `t` | `u16` `i16` `u32` `i32` `f32` `bool` | required | `value_type` |
 | IO | `f` | one read code (1–4), one write code (5, 6, 15, 16), or one of each | required | `read_fc`, `write_fc` |
@@ -52,9 +52,9 @@ Also rejected: unknown keys at any level, duplicate keys in one object, numbers 
 | Setting | Default | Over the limit |
 |---|---|---|
 | `CONFIG_MANAGER_MAX_UNITS` | 15 | rejected, `ESP_ERR_INVALID_SIZE` / `"err":"q"` |
-| `CONFIG_MANAGER_MAX_IOS` | 120 | same |
+| `CONFIG_MANAGER_MAX_IOS` | 100 | same |
 | `CONFIG_MANAGER_MAX_CONFIGURE_UNITS` | 20 | same |
-| `CONFIG_MANAGER_MAX_FILE_SIZE` | 5800 B of compact JSON | same |
+| `CONFIG_MANAGER_MAX_FILE_SIZE` | 4800 B of compact JSON | same |
 
 ## Hashes
 

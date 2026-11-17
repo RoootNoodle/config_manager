@@ -14,6 +14,7 @@
 #include <limits.h>
 #include <inttypes.h>
 #include <errno.h>
+#include <stdatomic.h>
 
 static const char *TAG = "CONFIG_MGR";
 
@@ -53,6 +54,11 @@ static esp_err_t load_locked(const char *known_id);
 
 // REVIEW: set while the RAM config is the default standing in for an unreadable file; apply_patch then merges onto that default.
 static bool s_file_bad = false;
+// REVIEW: set once the application asked for a config (load/save/reset); while set, a NULL g_config is retried, never permanent.
+// REVIEW: atomic because config_manager_load() sets it before it has the lock (a lock timeout must still lead to a retry).
+static atomic_bool s_config_wanted = false;
+// Device ID of the last config installed, for the fallback and the retry after g_config was lost
+static char s_device_id[MAX_NAME_LEN] = "";
 
 static size_t free_heap(void)
 {
@@ -100,8 +106,13 @@ static char *read_file(const char *path, size_t *len_out, esp_err_t *status)
         if (status) *status = ESP_ERR_INVALID_SIZE;
         return NULL;
     }
-    if (size > MAX_FILE_SIZE)
+    // REVIEW: checked before allocating, so an oversized file is "unusable" (fallback) instead of an endless out-of-memory.
+    if (size > MAX_FILE_SIZE) {
         ESP_LOGW(TAG, "%s is %ld B, over CONFIG_MANAGER_MAX_FILE_SIZE (%d)", path, size, MAX_FILE_SIZE);
+        fclose(f);
+        if (status) *status = ESP_ERR_INVALID_SIZE;
+        return NULL;
+    }
 
     char *buf = cm_malloc(size + 1);
     if (buf) {
@@ -264,6 +275,17 @@ static bool parse_vtype(const char *s, io_value_type_t *out)
     return false;
 }
 
+// REVIEW: IO names and the device ID end up in MQTT topics (sense/control, devices/{id}), so topic separators,
+// wildcards and control characters are not allowed in them.
+static bool topic_safe(const char *s)
+{
+    for (; *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '/' || c == '+' || c == '#' || c < 0x20 || c == 0x7f) return false;
+    }
+    return true;
+}
+
 static bool is_write_fc(long fc) { return fc == 5 || fc == 6 || fc == 15 || fc == 16; }
 
 static esp_err_t parse_io(const cJSON *io_json, io_config_t *io)
@@ -272,6 +294,10 @@ static esp_err_t parse_io(const cJSON *io_json, io_config_t *io)
     size_t name_len = strlen(name);
     if (name_len == 0 || name_len > IO_NAME_MAX) {
         ESP_LOGW(TAG, "Rejected: IO name '%s' must be 1..%d bytes", name, IO_NAME_MAX);
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!topic_safe(name)) {
+        ESP_LOGW(TAG, "Rejected: IO name '%s' contains '/', '+', '#' or a control character", name);
         return ESP_ERR_INVALID_ARG;
     }
     if (!object_ok(io_json, IO_KEYS, name)) return ESP_ERR_INVALID_ARG;
@@ -417,8 +443,9 @@ static esp_err_t validate_config(const cJSON *root, int *unit_count, int *io_cou
         ESP_LOGW(TAG, "Rejected: v missing or not a whole number >= 0");
         return ESP_ERR_INVALID_ARG;
     }
-    if (!cJSON_IsString(cJSON_GetObjectItemCaseSensitive(root, "id"))) {
-        ESP_LOGW(TAG, "Rejected: id missing or not a string");
+    const char *id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(root, "id"));
+    if (!id || !topic_safe(id)) {
+        ESP_LOGW(TAG, "Rejected: id missing, not a string, or contains '/', '+', '#' or a control character");
         return ESP_ERR_INVALID_ARG;
     }
     const char *n = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(root, "n"));
@@ -709,7 +736,9 @@ static esp_err_t build_config(const cJSON *root, int io_count, int cu_count, sys
     }
 
     cfg->hash = hash_root(w, root, cfg);
-    ESP_GOTO_ON_FALSE(w->rc == 0, ESP_FAIL, fail, TAG, "SHA-256 failed: -0x%04x", (unsigned)-w->rc);
+    // REVIEW: not ESP_FAIL, which is reserved for file errors ("fs"); a hash context without memory is "mem".
+    ESP_GOTO_ON_FALSE(w->rc == 0, w->rc == MBEDTLS_ERR_MD_ALLOC_FAILED ? ESP_ERR_NO_MEM : ESP_ERR_INVALID_RESPONSE,
+                      fail, TAG, "SHA-256 failed: -0x%04x", (unsigned)-w->rc);
 
     mbedtls_md_free(&w->md);
     cm_free(w);
@@ -733,6 +762,18 @@ static void log_loaded(const system_config_t *cfg)
              cfg->version, cfg->unit_count, cfg->io_pool_count, hex, free_heap());
 }
 
+// Makes cfg the active config. Caller holds the config lock.
+static void install_config(system_config_t *cfg, bool file_bad)
+{
+    free_config_struct(g_config);
+    g_config = cfg;
+    s_file_bad = file_bad;
+    atomic_store(&s_config_wanted, true);
+    memcpy(s_device_id, cfg->device_id, sizeof(s_device_id));
+    log_loaded(cfg);
+}
+
+
 // REVIEW: takes ownership of root and frees it before the file write, so tree and text never sit beside a second tree.
 // Caller holds the config lock. On error the active config is left as it was.
 static esp_err_t commit_tree(cJSON *root)
@@ -752,10 +793,7 @@ static esp_err_t commit_tree(cJSON *root)
         free_config_struct(cfg);
         return ret;
     }
-    free_config_struct(g_config);
-    g_config = cfg;
-    s_file_bad = false;
-    log_loaded(cfg);
+    install_config(cfg, false);
     return ESP_OK;
 }
 
@@ -789,6 +827,8 @@ esp_err_t config_manager_deinit(void)
     drop_active_config();
     memset(&s_patch_result, 0, sizeof(s_patch_result));
     s_file_bad = false;
+    atomic_store(&s_config_wanted, false);
+    s_device_id[0] = '\0';
     vSemaphoreDelete(s_config_mux);
     vSemaphoreDelete(s_file_mux);
     s_config_mux = NULL;
@@ -839,7 +879,9 @@ static esp_err_t fallback_locked(const cJSON *bad_root, const char *reason, cons
     if (!id) id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(bad_root, "device_ID"));
     if (!id) id = known_id;
     if (!id && g_config) id = g_config->device_id;
-    if (id) strncpy(device_id, id, MAX_NAME_LEN - 1);
+    if (!id) id = s_device_id;
+    // REVIEW: an ID that may not appear in a topic would make the default itself invalid, so it is dropped.
+    if (id && topic_safe(id)) strncpy(device_id, id, MAX_NAME_LEN - 1);
 
     if (reason)
         ESP_LOGW(TAG, "%s is %s: running on the empty default config (v0, no units) until the server sends a full config; "
@@ -853,10 +895,7 @@ static esp_err_t fallback_locked(const cJSON *bad_root, const char *reason, cons
     if (ret == ESP_OK) ret = build_config(root, ios, cus, &cfg);
     cJSON_Delete(root);
     if (ret != ESP_OK) return ret;
-    free_config_struct(g_config);
-    g_config = cfg;
-    s_file_bad = true;
-    log_loaded(cfg);
+    install_config(cfg, true);
     return ESP_OK;
 }
 
@@ -872,7 +911,8 @@ static esp_err_t load_locked(const char *known_id)
         }
         // REVIEW: out of memory or a lock timeout says nothing about the file, so the RAM config is left as it is.
         if (st == ESP_ERR_NO_MEM || st == ESP_ERR_TIMEOUT) return st;
-        return fallback_locked(NULL, st == ESP_ERR_INVALID_SIZE ? "empty" : "unreadable", known_id);
+        return fallback_locked(NULL, st == ESP_ERR_INVALID_SIZE ? "empty or over CONFIG_MANAGER_MAX_FILE_SIZE" : "unreadable",
+                               known_id);
     }
     cJSON *root = cJSON_Parse(text);
     cm_free(text);
@@ -892,16 +932,24 @@ static esp_err_t load_locked(const char *known_id)
         ESP_LOGE(TAG, "Could not build the config from %s: %s", CONFIG_MANAGER_FILE_PATH, esp_err_to_name(ret));
         return ret;
     }
-    free_config_struct(g_config);
-    g_config = cfg;
-    s_file_bad = false;
-    log_loaded(cfg);
+    install_config(cfg, false);
     return ESP_OK;
+}
+
+// REVIEW: called where the server talks to the library; recovers from a reload that failed after a rejected patch.
+static void ensure_config_locked(void)
+{
+    if (g_config || !atomic_load(&s_config_wanted)) return;
+    ESP_LOGW(TAG, "No config in RAM (an earlier reload failed), loading %s again", CONFIG_MANAGER_FILE_PATH);
+    esp_err_t ret = load_locked(s_device_id[0] ? s_device_id : NULL);
+    if (ret != ESP_OK) ESP_LOGE(TAG, "Reload failed again (%s); retried on the next state, sync or set", esp_err_to_name(ret));
 }
 
 esp_err_t config_manager_load(void)
 {
     if (!s_file_mux) return ESP_ERR_INVALID_STATE;
+    // REVIEW: set before the lock so that even a lock timeout here is retried by the next state, sync or set.
+    atomic_store(&s_config_wanted, true);
     if (!take_config(LOCK_TIMEOUT_MS)) return ESP_ERR_TIMEOUT;
     esp_err_t ret = load_locked(NULL);
     give_config();
@@ -968,6 +1016,7 @@ void config_manager_unload(void)
         g_config = NULL;
         ESP_LOGI(TAG, "Configuration unloaded from RAM");
     }
+    atomic_store(&s_config_wanted, false);   // unloading is deliberate: no automatic reload
     give_config();
 }
 
@@ -1010,6 +1059,36 @@ const char *config_manager_get_string(const char *key)
     return NULL;
 }
 
+bool config_manager_is_fallback(void)
+{
+    if (!take_config(LOCK_TIMEOUT_MS)) return false;
+    bool bad = s_file_bad && g_config;
+    give_config();
+    return bad;
+}
+
+esp_err_t config_manager_copy_string(const char *key, char *out, size_t out_size)
+{
+    if (!key || !out || out_size == 0) return ESP_ERR_INVALID_ARG;
+    out[0] = '\0';
+    if (!s_config_mux) return ESP_ERR_INVALID_STATE;
+    if (!take_config(LOCK_TIMEOUT_MS)) return ESP_ERR_TIMEOUT;
+    esp_err_t ret = ESP_OK;
+    const char *src = NULL;
+    if (!g_config)                          ret = ESP_ERR_INVALID_STATE;
+    else if (strcmp(key, "name") == 0)      src = g_config->name;
+    else if (strcmp(key, "device_ID") == 0) src = g_config->device_id;
+    else                                    ret = ESP_ERR_NOT_FOUND;
+    if (src) {
+        size_t len = strlen(src);
+        // REVIEW: all or nothing: a value that does not fit leaves "" rather than a truncated name or ID.
+        if (len >= out_size) ret = ESP_ERR_INVALID_SIZE;
+        else memcpy(out, src, len + 1);
+    }
+    give_config();
+    return ret;
+}
+
 int config_manager_find_unit(uint8_t unit_key)
 {
     if (!take_config(100)) return -1;
@@ -1023,14 +1102,46 @@ int config_manager_find_unit(uint8_t unit_key)
     return idx;
 }
 
+// REVIEW: get_payload's result is documented as free(); cJSON's allocator may be replaced by app hooks, so copy into cm_malloc.
+static char *print_for_free(const cJSON *tree)
+{
+    char *tmp = cJSON_PrintUnformatted(tree);
+    if (!tmp) return NULL;
+    size_t len = strlen(tmp) + 1;
+    char *out = cm_malloc(len);
+    if (out) memcpy(out, tmp, len);
+    cJSON_free(tmp);
+    return out;
+}
+
+// REVIEW: while the file is unusable, readers get the default in RAM, so get/data agree with the published h.
+// *bad tells the caller which one it is; returns false on a lock timeout (nothing should be read then).
+static bool fallback_check(bool *bad, char device_id[MAX_NAME_LEN])
+{
+    if (!take_config(LOCK_TIMEOUT_MS)) return false;
+    *bad = s_file_bad;
+    memcpy(device_id, g_config ? g_config->device_id : s_device_id, MAX_NAME_LEN);
+    give_config();
+    return true;
+}
+
+// The tree get/data answers from: the default while the file is unusable, else the file.
+static cJSON *read_tree(void)
+{
+    bool bad = false;
+    char device_id[MAX_NAME_LEN];
+    if (!fallback_check(&bad, device_id)) return NULL;
+    return bad ? make_default_tree(device_id) : load_config_file();
+}
+
 cJSON *config_manager_get_config_json(void)
 {
-    return load_config_file();
+    return read_tree();
 }
 
 cJSON *config_manager_get_unit_json(uint8_t unit_key)
 {
-    cJSON *root = load_config_file();
+    cJSON *root = read_tree();
     if (!root) return NULL;
     char key_str[4];
     snprintf(key_str, sizeof(key_str), "%u", unit_key);
@@ -1060,13 +1171,20 @@ char *config_manager_get_payload(const char *request_json)
     // REVIEW: {} returns the stored file text as-is; it is already compact JSON, so no tree is built.
     if (!u_req && !cu_req) {
         cJSON_Delete(req);
-        return read_config_text(NULL, NULL);
+        bool bad = false;
+        char device_id[MAX_NAME_LEN];
+        if (!fallback_check(&bad, device_id)) return NULL;
+        if (!bad) return read_config_text(NULL, NULL);
+        cJSON *def = make_default_tree(device_id);
+        char *text = def ? print_for_free(def) : NULL;
+        cJSON_Delete(def);
+        return text;
     }
 
     bool want_cu = cJSON_IsTrue(cu_req) || (cJSON_IsNumber(cu_req) && cu_req->valuedouble != 0);
     char *out = NULL;
     cJSON *resp = NULL;
-    cJSON *root = load_config_file();
+    cJSON *root = read_tree();
     if (!root) goto done;
 
     resp = cJSON_CreateObject();
@@ -1096,7 +1214,7 @@ char *config_manager_get_payload(const char *request_json)
     }
     cJSON_Delete(root);
     root = NULL;
-    if (ok) out = cJSON_PrintUnformatted(resp);
+    if (ok) out = print_for_free(resp);
 
 done:
     if (!out) ESP_LOGE(TAG, "CFG_GET: could not build data payload (heap %zu)", free_heap());
@@ -1112,6 +1230,7 @@ static bool bit_get(const uint8_t *map, uint8_t key) { return map[key >> 3] & (1
 cJSON *config_manager_build_state(bool all_units)
 {
     if (!take_config(1000)) return NULL;
+    ensure_config_locked();
     if (!g_config) {
         give_config();
         return NULL;
@@ -1298,15 +1417,15 @@ static void record_changes(const system_config_t *cfg, const cfg_snapshot_t *sna
     }
 }
 
-// REVIEW: short err codes decided by the user: q quota, v version, inv invalid, mem memory, fs storage.
+// REVIEW: short err codes decided by the user; same mapping as rule_manager: only ESP_FAIL (file read/write) is "fs".
 static const char *err_text(esp_err_t err)
 {
     switch (err) {
     case ESP_ERR_INVALID_SIZE:    return "q";
     case ESP_ERR_INVALID_VERSION: return "v";
-    case ESP_ERR_INVALID_ARG:     return "inv";
     case ESP_ERR_NO_MEM:          return "mem";
-    default:                      return "fs";
+    case ESP_FAIL:                return "fs";
+    default:                      return "inv";
     }
 }
 
@@ -1333,7 +1452,13 @@ static esp_err_t apply_patch_locked(cJSON *patch, int *old_ver, bool *duplicate)
         *duplicate = true;
         goto out;
     }
-    ESP_GOTO_ON_FALSE(patch_keys_ok(patch), ESP_ERR_INVALID_ARG, out, TAG, "CFG_SET: rejected, unknown key");
+    // REVIEW: a body with "s" is a complete file that replaces the stored one (user decision); no merge, file not read.
+    const cJSON *s_item = cJSON_GetObjectItemCaseSensitive(patch, "s");
+    bool full = s_item != NULL;
+    long s_val;
+    ESP_GOTO_ON_FALSE(!full || get_int(s_item, 2, 2, &s_val), ESP_ERR_INVALID_ARG, out, TAG,
+                      "CFG_SET: rejected, s must be %d", CONFIG_MANAGER_SCHEMA_VERSION);
+    ESP_GOTO_ON_FALSE(full || patch_keys_ok(patch), ESP_ERR_INVALID_ARG, out, TAG, "CFG_SET: rejected, unknown key");
 
     snap = take_snapshot(g_config);
     ESP_GOTO_ON_FALSE(snap, ESP_ERR_NO_MEM, out, TAG, "CFG_SET: no memory for snapshot");
@@ -1345,13 +1470,19 @@ static esp_err_t apply_patch_locked(cJSON *patch, int *old_ver, bool *duplicate)
     g_config = NULL;
     ESP_LOGD(TAG, "CFG_SET: freed active config, heap %zu", free_heap());
 
-    // REVIEW: with an unreadable file the patch merges onto the default in RAM, so a full config from the server repairs it.
-    root = s_file_bad ? make_default_tree(device_id) : load_config_file();
-    ESP_GOTO_ON_FALSE(cJSON_IsObject(root), ESP_FAIL, restore, TAG, "CFG_SET: could not read %s", CONFIG_MANAGER_FILE_PATH);
-    ret = merge_patch(root, patch);
-    cJSON_Delete(patch);
-    patch = NULL;
-    ESP_GOTO_ON_ERROR(ret, restore, TAG, "CFG_SET: merge failed");
+    if (full) {
+        // REVIEW: the body itself becomes the new file; commit_tree validates it as a complete v2 file.
+        root = patch;
+        patch = NULL;
+    } else {
+        // REVIEW: with an unreadable file the patch merges onto the default in RAM, so a full config from the server repairs it.
+        root = s_file_bad ? make_default_tree(device_id) : load_config_file();
+        ESP_GOTO_ON_FALSE(cJSON_IsObject(root), ESP_FAIL, restore, TAG, "CFG_SET: could not read %s", CONFIG_MANAGER_FILE_PATH);
+        ret = merge_patch(root, patch);
+        cJSON_Delete(patch);
+        patch = NULL;
+        ESP_GOTO_ON_ERROR(ret, restore, TAG, "CFG_SET: merge failed");
+    }
 
     ret = commit_tree(root);
     root = NULL;
@@ -1388,6 +1519,7 @@ esp_err_t config_manager_apply_patch(const char *json)
         cJSON_Delete(patch);
         return ESP_ERR_TIMEOUT;
     }
+    ensure_config_locked();
     int old_ver = 0;
     bool duplicate = false;
     esp_err_t ret = apply_patch_locked(patch, &old_ver, &duplicate);
@@ -1395,7 +1527,8 @@ esp_err_t config_manager_apply_patch(const char *json)
     // REVIEW: a lower or missing v is reported with err "v"; a duplicate leaves any unreported patch result in place.
     if (ret == ESP_OK) {
         if (!duplicate) s_patch_result.pending = true;
-    } else if (ret != ESP_ERR_INVALID_STATE) {
+    } else if (ret != ESP_ERR_INVALID_STATE && ret != ESP_ERR_TIMEOUT) {
+        // REVIEW: a lock timeout records nothing, as in rule_manager.
         memset(&s_patch_result, 0, sizeof(s_patch_result));
         s_patch_result.pending = true;
         s_patch_result.err = err_text(ret);
@@ -1427,6 +1560,7 @@ bool config_manager_handle_sync(const char *json_data)
         cJSON_Delete(msg);
         return false;
     }
+    ensure_config_locked();
     bool out_of_sync = false;
     if (g_config) {
         char hex[9];
@@ -1472,6 +1606,47 @@ esp_err_t config_update_live_value(const char *io_name, uint8_t unit_idx, float 
             ret = ESP_ERR_NOT_FOUND;
         }
     }
+    give_config();
+    return ret;
+}
+
+// REVIEW: lookup by unit key and access in one lock hold, so a patch cannot move the unit in between.
+static esp_err_t live_by_key_locked(uint8_t unit_key, const char *io_name, io_config_t **io_out)
+{
+    if (!g_config) return ESP_ERR_INVALID_STATE;
+    const unit_config_t *unit = find_unit_in(g_config, unit_key);
+    if (!unit) return ESP_ERR_NOT_FOUND;
+    for (int i = 0; i < unit->io_count; i++) {
+        io_config_t *io = &g_config->io_pool[unit->io_pool_offset + i];
+        if (strcmp(io->name, io_name) == 0) {
+            *io_out = io;
+            return ESP_OK;
+        }
+    }
+    return ESP_ERR_NOT_FOUND;
+}
+
+esp_err_t config_manager_set_live_value(uint8_t unit_key, const char *io_name, float value)
+{
+    if (!io_name) return ESP_ERR_INVALID_ARG;
+    if (!s_config_mux) return ESP_ERR_INVALID_STATE;
+    if (!take_config(100)) return ESP_ERR_TIMEOUT;
+    io_config_t *io = NULL;
+    esp_err_t ret = live_by_key_locked(unit_key, io_name, &io);
+    if (ret == ESP_OK) io->live_value = value;
+    give_config();
+    return ret;
+}
+
+esp_err_t config_manager_get_live_value(uint8_t unit_key, const char *io_name, float *out)
+{
+    if (!io_name || !out) return ESP_ERR_INVALID_ARG;
+    *out = NAN;
+    if (!s_config_mux) return ESP_ERR_INVALID_STATE;
+    if (!take_config(100)) return ESP_ERR_TIMEOUT;
+    io_config_t *io = NULL;
+    esp_err_t ret = live_by_key_locked(unit_key, io_name, &io);
+    if (ret == ESP_OK) *out = io->live_value;
     give_config();
     return ret;
 }

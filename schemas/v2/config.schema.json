@@ -18,7 +18,8 @@
     },
     "id": {
       "type": "string",
-      "description": "Device ID"
+      "description": "Device ID. Used in MQTT topics, so no '/', '+', '#' or control characters.",
+      "pattern": "^[^/+#\\u0000-\\u001f\\u007f]*$"
     },
     "n": {
       "type": "string",
@@ -83,10 +84,11 @@
         },
         "io": {
           "type": "object",
-          "description": "IOs; the key is the IO name",
+          "description": "IOs; the key is the IO name. It is used in MQTT topics, so no '/', '+', '#' or control characters.",
           "propertyNames": {
             "minLength": 1,
-            "maxLength": 31
+            "maxLength": 31,
+            "pattern": "^[^/+#\\u0000-\\u001f\\u007f]+$"
           },
           "additionalProperties": {
             "$ref": "#/definitions/io"

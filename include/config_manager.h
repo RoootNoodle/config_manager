@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <stddef.h>
 #include <stdbool.h>
 #include <math.h>
 #include "sdkconfig.h"
@@ -108,8 +109,46 @@ esp_err_t config_manager_await_idle(uint32_t timeout_ms);
 
 // Read helpers
 int         config_manager_get_version(void);
-const char *config_manager_get_string(const char *key);   // "name" or "device_ID"
-cJSON      *config_manager_get_config_json(void);          // from file; caller cJSON_Delete()
+cJSON      *config_manager_get_config_json(void);          // from file (or the fallback default); caller cJSON_Delete()
+
+/**
+ * @brief Pointer to a string of the active config.
+ *
+ * The pointer points into the active config, which a load, save or patch frees. The caller must hold
+ * config_manager_lock() while calling this and while using the result. New code should use
+ * config_manager_copy_string().
+ *
+ * @param key "name" or "device_ID".
+ * @return The string, or NULL for an unknown key or when no config is loaded.
+ */
+// REVIEW: kept for existing callers; unsafe without the lock, so the docblock points to the copy function.
+const char *config_manager_get_string(const char *key);
+
+/**
+ * @brief Copy a string of the active config under the config lock.
+ *
+ * @param key      "name" or "device_ID" (same keys as config_manager_get_string()).
+ * @param out      Destination; on any error other than ESP_ERR_INVALID_ARG it holds "".
+ * @param out_size Size of out in bytes, including the terminating NUL.
+ * @return
+ *  - ESP_OK on success
+ *  - ESP_ERR_INVALID_ARG if key or out is NULL or out_size is 0
+ *  - ESP_ERR_NOT_FOUND if the key is unknown
+ *  - ESP_ERR_INVALID_SIZE if the string does not fit (out is "")
+ *  - ESP_ERR_INVALID_STATE if no config is loaded
+ *  - ESP_ERR_TIMEOUT if the config lock was not taken
+ */
+esp_err_t config_manager_copy_string(const char *key, char *out, size_t out_size);
+
+/**
+ * @brief Whether the active config is the in-RAM default standing in for an unusable stored file.
+ *
+ * While this is true the bad file is kept on flash until the server's config replaces it, so the
+ * application must not call config_manager_reset_to_default() (that would overwrite it).
+ *
+ * @return true while running on the fallback; false otherwise, or if the config lock was not taken.
+ */
+bool config_manager_is_fallback(void);
 
 /**
  * @brief Index of a unit in system_config_t.units[].
@@ -158,10 +197,16 @@ cJSON *config_manager_build_state(bool all_units);
 cJSON *config_manager_build_limits(void);
 
 /**
- * @brief Apply a v2/cfg/set body (JSON Merge Patch, RFC 7396) to the stored config.
+ * @brief Apply a v2/cfg/set body to the stored config.
+ *
+ * Two forms:
+ *  - Without the root key `s`: a JSON Merge Patch (RFC 7396) on the stored file.
+ *  - With `s` (must be 2): a complete config file that replaces the stored one; the stored file is not read
+ *    and nothing is merged. Units it does not contain are deleted. This is also how a config is repaired
+ *    while running on the fallback.
  *
  * The result must be a valid v2 file within quota, otherwise the stored config is kept.
- * Live values of units that did not change are kept. Publish config_manager_build_state(false) afterwards.
+ * Live values of units whose hash did not change are kept. Publish config_manager_build_state(false) afterwards.
  *
  * A `v` equal to the stored version is a duplicate delivery: nothing is applied, ESP_OK is returned
  * and nothing is recorded: the next state is the plain state without `err`, or still the result of
@@ -172,11 +217,13 @@ cJSON *config_manager_build_limits(void);
  * @return
  *  - ESP_OK on success, or when `v` equals the stored version (duplicate, nothing applied)
  *  - ESP_ERR_INVALID_VERSION if `v` is missing or lower than the stored version (state `err` is "v")
- *  - ESP_ERR_INVALID_ARG if json is NULL, not a JSON object, has an unknown key, or the result is not a valid v2 file
+ *  - ESP_ERR_INVALID_ARG if json is NULL, not a JSON object, has an unknown key, `s` is not 2, or the result is
+ *    not a valid v2 file
  *  - ESP_ERR_INVALID_SIZE if the result goes over a quota (state `err` is "q")
  *  - ESP_ERR_NO_MEM if an allocation failed
- *  - ESP_ERR_INVALID_STATE if config_manager_init() was not called or config_manager_load() never succeeded
- *    (an unreadable file does not cause this: the patch is merged onto the default config)
+ *  - ESP_ERR_INVALID_STATE if config_manager_init() was not called, config_manager_load() was never called,
+ *    after config_manager_unload(), or the config cannot be loaded right now (it is retried on every call;
+ *    an unreadable file does not cause this: the patch is merged onto the default config)
  *  - ESP_ERR_TIMEOUT if the config or file lock was not taken
  *  - ESP_FAIL if the file could not be read or written
  */
@@ -191,7 +238,39 @@ esp_err_t config_manager_apply_patch(const char *json);
  */
 bool config_manager_handle_sync(const char *json_data);
 
-// Live values (stored in io_pool, protected by the config lock); unit_idx comes from config_manager_find_unit()
+/**
+ * @brief Store the live value of an IO, looked up by unit key under one lock hold.
+ *
+ * @param unit_key Unit key (1-255).
+ * @param io_name  IO name.
+ * @param value    New value.
+ * @return
+ *  - ESP_OK on success
+ *  - ESP_ERR_INVALID_ARG if io_name is NULL
+ *  - ESP_ERR_NOT_FOUND if the unit or the IO does not exist
+ *  - ESP_ERR_INVALID_STATE if not initialised or no config is loaded
+ *  - ESP_ERR_TIMEOUT if the config lock was not taken within 100 ms
+ */
+esp_err_t config_manager_set_live_value(uint8_t unit_key, const char *io_name, float value);
+
+/**
+ * @brief Read the live value of an IO, looked up by unit key under one lock hold.
+ *
+ * @param unit_key Unit key (1-255).
+ * @param io_name  IO name.
+ * @param out      Receives the value (NAN until first written; NAN on any error).
+ * @return
+ *  - ESP_OK on success
+ *  - ESP_ERR_INVALID_ARG if io_name or out is NULL
+ *  - ESP_ERR_NOT_FOUND if the unit or the IO does not exist
+ *  - ESP_ERR_INVALID_STATE if not initialised or no config is loaded
+ *  - ESP_ERR_TIMEOUT if the config lock was not taken within 100 ms
+ */
+esp_err_t config_manager_get_live_value(uint8_t unit_key, const char *io_name, float *out);
+
+// REVIEW: index-based variants unchanged; an index from find_unit() is only valid while the caller holds config_manager_lock().
+// Live values by index into units[]; only valid while the caller holds config_manager_lock() across
+// config_manager_find_unit() and this call. New code should use the key-based functions above.
 esp_err_t config_update_live_value(const char *io_name, uint8_t unit_idx, float new_val);
 float     config_get_live_value(const char *io_name, uint8_t unit_idx);  // NAN on miss
 

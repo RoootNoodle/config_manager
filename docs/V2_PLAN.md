@@ -35,7 +35,7 @@ Items marked **(decision)** are proposals that still need a yes.
 |---|---|---|---|
 | `s` | schema version, always 2 | new | rejected |
 | `v` | config version counter | `config_version` | rejected |
-| `id` | device ID | `device_ID` | rejected |
+| `id` | device ID; no `/`, `+`, `#` or control characters (it is used in topics) | `device_ID` | rejected |
 | `n` | gateway name, at most 39 characters | `name` | rejected |
 | `gps` | GNSS on (1) or off (0) | `gps_enabled` | 0 |
 | `cu` | sensor type → register that holds the unit address | `configure_units` | empty |
@@ -50,7 +50,7 @@ Items marked **(decision)** are proposals that still need a yes.
 | `a` | Modbus address, 2–247 | `unit_address` | rejected |
 | `w` | publish interval on WiFi, seconds | `unit_wifi_interval` | 60 |
 | `c` | publish interval on cellular (NB-IoT), seconds | `unit_NB-IOT_interval` | 300 |
-| `io` | IOs; the key is the IO name, at most 31 characters | `IO_config` and `IO_name` | rejected |
+| `io` | IOs; the key is the IO name, at most 31 characters, no `/`, `+`, `#` or control characters (it is used in the `sense` and `control` topics) | `IO_config` and `IO_name` | rejected |
 
 The unit key never changes and is never reused on a gateway. Rules, the control topic and hashes all refer to it.
 
@@ -94,9 +94,16 @@ The library builds and parses the message bodies. The application owns the MQTT 
 
 ## 4. Updating the config
 
-### `v2/cfg/set`: patch
+### `v2/cfg/set`: patch or full file
 
-The body is a piece of the file in the same shape (JSON Merge Patch, RFC 7396):
+A `set` body has one of two forms, told apart by the root key `s`:
+
+- **Without `s`: a patch.** A piece of the file in the same shape (JSON Merge Patch, RFC 7396), merged into the stored file.
+- **With `s`: a full file.** A complete config file that **replaces** the stored one. Nothing is merged and the stored file is not read (only one JSON tree is in RAM). `s` must be 2, otherwise `"err":"inv"`. The body must be a valid complete file (no `null` values). Units it does not contain are deleted. This is also the repair path when the gateway runs on the fallback for an unusable file.
+
+The `v` rules and the state reply are the same for both forms: `state.u` lists every unit whose hash changed, `null` for a unit that is gone; live values of units whose hash did not change are kept.
+
+Patch rules (JSON Merge Patch):
 
 - An object merges into the stored object, key by key.
 - Any other value replaces the stored value. Arrays (`f`) are replaced whole.
@@ -114,12 +121,13 @@ The body is a piece of the file in the same shape (JSON Merge Patch, RFC 7396):
 | Delete an IO | `{"v":13,"u":{"2":{"io":{"relay":null}}}}` | 39 |
 | Delete unit 3 | `{"v":14,"u":{"3":null}}` | 22 |
 | Add a unit | `{"v":15,"u":{"4":{ …full unit… }}}` | unit size |
-| Full config | every key; `null` for units to drop | file size |
+| Replace one unit completely | two patches: `{"v":16,"u":{"4":null}}`, then `{"v":17,"u":{"4":{ …full unit… }}}` (a patch merges, so keys missing from the new unit would otherwise survive) | unit size |
+| Replace everything | the full file with `"s":2`; units left out are deleted | file size |
 
 What the gateway does:
 
-1. Parse the body. Ignore it when `v` equals the stored version. Reject it when `v` is lower or missing, or a key is unknown.
-2. Load the stored file and merge.
+1. Parse the body. Ignore it when `v` equals the stored version. Reject it when `v` is lower or missing, `s` is present but not 2, or a key is unknown.
+2. Patch: load the stored file and merge. Full file (`s` present): take the body as the new file.
 3. Validate the result as a complete v2 file. If it is invalid, keep the old file and report `err`.
 4. Write the file, rebuild the in-memory config, recompute the hashes of the units that changed and the root hash.
 5. Publish `state`.
@@ -137,7 +145,7 @@ Live values of units that did not change are kept across a patch. Units that cha
 | `v` | version now stored |
 | `h` | root hash |
 | `u` | unit hashes. After a patch: the units that changed (`null` for a deleted one); left out when no unit changed. After a sync mismatch: all units. On connect: left out. |
-| `err` | present when a patch was rejected; `v` and `h` then describe the unchanged config. Short codes: `q` quota, `v` version lower or missing, `inv` invalid (bad JSON, unknown key, invalid result), `mem` out of memory, `fs` file read or write failed. |
+| `err` | present when a patch was rejected; `v` and `h` then describe the unchanged config. Short codes: `q` quota, `v` version lower or missing, `inv` invalid (bad JSON, unknown key, invalid result), `mem` out of memory, `fs` file read or write failed. A lock timeout records nothing. |
 
 ### `v2/cfg/sync`
 
@@ -193,10 +201,10 @@ The library does not convert v1 files. The v2 file has its own path, so the v1 f
 
 1. v2 firmware starts with no v2 file. `config_manager_load()` writes the factory default: `s`, `"v":0`, the device ID, the default name, no units.
 2. On connect the gateway publishes `v2/cfg/state`.
-3. The server sees the hash differs from its copy and sends the full config on `v2/cfg/set`.
+3. The server sees the hash differs from its copy and sends the full file (with `"s":2`) on `v2/cfg/set`.
 4. After the file is saved and reloaded without error, the library deletes the v1 file (`CONFIG_CONFIG_MANAGER_V1_FILE_PATH`; empty disables this).
 
-**Unreadable file.** A v2 file that cannot be used (not JSON, truncated, empty, fails validation, over the quota, wrong schema) is handled like a missing one, but only in RAM: the library logs a warning and runs on the default (`"v":0`, no units). The device ID is the `id` of the bad file if it is still readable JSON (`id`, or `device_ID` of a v1 file), otherwise the device ID of the config that was in RAM, otherwise `""`. The bad file is not overwritten or deleted. Step 2 then publishes a hash the server does not match, the server sends the full config, `apply_patch` merges it onto the default (its `v` is above 0) and writes the file. Until then the gateway has no units.
+**Unreadable file.** A v2 file that cannot be used (not JSON, truncated, empty, larger than `CONFIG_MANAGER_MAX_FILE_SIZE`, fails validation, over the quota, wrong schema) is handled like a missing one, but only in RAM: the library logs a warning and runs on the default (`"v":0`, no units). The device ID is the `id` of the bad file if it is still readable JSON (`id`, or `device_ID` of a v1 file), otherwise the device ID of the config that was in RAM or, if none, the last one the library had since `init`, otherwise `""`. An ID with `/`, `+`, `#` or a control character is dropped. The bad file is not overwritten or deleted, and `v2/cfg/get` answers from the default, matching the published `h`. Step 2 then publishes a hash the server does not match, the server sends the full file with `"s":2`, which replaces the default (its `v` is above 0) and is written. The application can tell this state with `config_manager_is_fallback()` and must not call `config_manager_reset_to_default()` while it is true. Until then the gateway has no units.
 
 **Between the firmware update and step 3 the gateway has no units and reads no sensors.** Web must speak v2 before v2 firmware is rolled out. If the new firmware is rolled back before step 4, the v1 file is still there.
 
@@ -216,7 +224,9 @@ The library does not convert v1 files. The v2 file has its own path, so the v1 f
 ## 7. Guide for Web
 
 1. Keep the v2 config per gateway. Display data (units of measurement, limits, accuracy, manufacturer) stays in the Web database and is not sent.
-2. For every change, send the smallest `set` that describes it and increase `v` by one.
+2. For every change, send the smallest `set` that describes it. **Before every `set`, take `v` from the newest `v2/cfg/state` of that gateway and add one**: the gateway also changes its config itself (auto-addressing adds a unit with `v` = stored + 1), so a `v` counted only in Web can be stale. Treat a `state` whose `h` differs from what Web expects as "resync" (`sync`, then `get` or resend).
+   - To replace one unit completely, send two patches: `null` for the unit, then the full unit (a patch merges, so keys left out of the new unit would survive).
+   - To replace everything, send the full file with `"s":2`. Units left out are deleted.
 3. Compute the unit and root hash as in section 5 and compare with the `state` that comes back. A different `h` means the patch did not produce what Web expected: send `sync`, read the unit hashes, resend the units that differ.
 4. On `err`, nothing was changed on the gateway. Show the meaning of the code to the user (`q`, `v`, `inv`, `mem`, `fs`, see `v2/cfg/state`).
 5. Never reuse a unit key. A deleted unit's key stays retired, because rules and history refer to it.
@@ -231,7 +241,7 @@ The gateway publishes on `devices/{id}/v2/caps`, QoS 1, not retained, once after
 
 ```json
 {"fw":"1.2.0","hw":"GW-C6","s":2,"msg":16384,
- "cfg":{"u":15,"io":120,"cu":20,"b":5800},
+ "cfg":{"u":15,"io":100,"cu":20,"b":4800},
  "rl":{"r":25,"b":5800,"tp":8,"tw":16}}
 ```
 
@@ -248,7 +258,7 @@ The gateway publishes on `devices/{id}/v2/caps`, QoS 1, not retained, once after
 
 Web keeps the last `caps` per gateway and uses it to:
 
-1. Show what is used and what is left ("96 of 120 IOs").
+1. Show what is used and what is left ("86 of 100 IOs").
 2. Block a change that would go over a limit, before sending anything.
 3. Split a config larger than `msg` into several `set` messages.
 
@@ -259,17 +269,17 @@ The numbers come from Kconfig in each firmware project, so each board gets value
 | Setting | Proposed, ESP32-C6 (MIOT_GW) | Proposed, ESP32-C5 + PSRAM (MIOT_GW_NTN) |
 |---|---|---|
 | `CONFIG_MANAGER_MAX_UNITS` | 15 | 15 |
-| `CONFIG_MANAGER_MAX_IOS` (new) | 120 | 600 |
-| `CONFIG_MANAGER_MAX_FILE_SIZE` (new) | 5800 | 28000 |
+| `CONFIG_MANAGER_MAX_IOS` (new) | 100 (Kconfig default) | 600 (set by the application) |
+| `CONFIG_MANAGER_MAX_FILE_SIZE` (new) | 4800 (Kconfig default) | 28000 (set by the application) |
 
-**Where the numbers come from.** The RAM that matters is the peak while a file is loaded or updated: the file text plus the JSON tree built from it, about 8.5 times the file size (*est*). Every update reaches this peak, also one that changes a single value.
+**Where the numbers come from.** The RAM that matters is the peak while a file is loaded or updated: the file text plus the JSON tree built from it (the tree is about 7 times the file size on a 32-bit chip, *est*), plus the new in-RAM config (about 60 B per IO) and the output buffer (`CONFIG_MANAGER_MAX_FILE_SIZE`). Every update reaches this peak, also one that changes a single value. A full-file `set` reaches it too, with the body's tree in place of the file's; on top of that comes the MQTT receive buffer that holds the body text.
 
 | Board | RAM budget for one load or update | File size that fits | In IOs |
 |---|---|---|---|
-| ESP32-C6 | 50 kB (decided) | about 5,800 B | 120 IOs in 15 units peak at 48 kB (*est*) |
+| ESP32-C6 | 50 kB (decided) | 4,800 B | at the limit about 47 kB for a patch or a full-file set, plus the MQTT receive buffer (*est*). 4,800 B holds about 80 IOs in 15 units with typical names, or 100 IOs with short names and few optional keys |
 | ESP32-C5, 8 MB PSRAM shared with other features | 256 kB, 3% of the PSRAM (decided for now, may be adjusted) | about 28,000 B | 600 IOs in 15 units peak at 211 kB (*est*) |
 
-What stays in RAM afterwards is far smaller: about 5.6 kB for 120 IOs and 27 kB for 600 (*plan*). The peaks are calculated, not measured; confirm them with a heap log on a device.
+What stays in RAM afterwards is far smaller: about 6.6 kB for 100 IOs and 37 kB for 600 (*est*, 60 B per IO plus the units). The peaks are calculated, not measured; confirm them with a heap log on a device.
 
 The gateway works fully offline on the stored config. Changes made in Web while a gateway is offline are delivered when it reconnects (QoS 1, persistent session), and `sync` repairs anything that was missed.
 
@@ -284,7 +294,10 @@ The gateway works fully offline on the stored config. Changes made in Web while 
 | `unit_config_t` | `name[40]` (held the JSON key) becomes `uint8_t key`; `hash[65]` becomes `uint32_t hash` |
 | `system_config_t` | `system_hash[65]` becomes `uint32_t hash`; `configure_units_hash` is removed (part of the root hash); new `bool gps_enabled` |
 | `int config_manager_find_unit(uint8_t unit_key)` | new; index into `units[]`, or -1 |
-| `config_update_live_value()`, `config_get_live_value()` | unchanged; they take the index from `config_manager_find_unit()` |
+| `config_update_live_value()`, `config_get_live_value()` | unchanged; they take the index from `config_manager_find_unit()`, which is only valid while the caller holds `config_manager_lock()` |
+| `esp_err_t config_manager_set_live_value(uint8_t unit_key, const char *io_name, float value)`, `esp_err_t config_manager_get_live_value(uint8_t unit_key, const char *io_name, float *out)` | new; by unit key, lookup and access under one lock hold |
+| `esp_err_t config_manager_copy_string(const char *key, char *out, size_t out_size)` | new; copies `"name"` or `"device_ID"` under the lock. `config_manager_get_string()` stays, but only while the caller holds `config_manager_lock()` |
+| `bool config_manager_is_fallback(void)` | new; true while the in-RAM default stands in for an unusable stored file |
 | `esp_err_t config_manager_apply_patch(const char *json)` | replaces `config_manager_handle_partial_update()` and `config_manager_delete_unit()` |
 | `bool config_manager_handle_sync(const char *json)` | same name; compares the root hash |
 | `cJSON *config_manager_build_state(bool all_units)` | replaces `config_manager_get_all_unit_hashes()` and `config_manager_compute_configure_units_hash()` |
@@ -308,8 +321,8 @@ The unit name (`n`) and type (`ty`) are not kept in RAM; they are read from the 
 |---|---|
 | `CONFIG_MANAGER_FILE_PATH` | `/spiffs/config_v2.json` |
 | `CONFIG_MANAGER_V1_FILE_PATH` | `/spiffs/config.json` |
-| `CONFIG_MANAGER_MAX_IOS` | 120 |
-| `CONFIG_MANAGER_MAX_FILE_SIZE` | 5800 |
+| `CONFIG_MANAGER_MAX_IOS` | 100 |
+| `CONFIG_MANAGER_MAX_FILE_SIZE` | 4800 |
 
 ### Tests (host)
 
@@ -350,6 +363,6 @@ Not part of this library, listed so nothing is forgotten when MIOT_GW adopts v2:
 |---|---|---|
 Decided: `f` is required on every IO; names as listed; file name `config_v2.json`.
 
-Decided: the RAM budget for one load or update is 50 kB on the ESP32-C6 (120 IOs, 5.8 kB file) and 256 kB on the ESP32-C5 for now (600 IOs, 28 kB file); `caps` is sent once after every connect on `v2/caps`.
+Decided: the RAM budget for one load or update is 50 kB on the ESP32-C6 (100 IOs, 4.8 kB file; lowered from 120 / 5.8 kB) and 256 kB on the ESP32-C5 for now (600 IOs, 28 kB file); `caps` is sent once after every connect on `v2/caps`.
 
 No open items.

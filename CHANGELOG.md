@@ -7,7 +7,7 @@ The full design is in [docs/V2_PLAN.md](docs/V2_PLAN.md). Not compatible with v1
 ### Schema
 - `schemas/v2/config.schema.json` and `config_example.json` are new. `schemas/v1/` is not changed.
 - Short keys (`s`, `v`, `id`, `n`, `gps`, `cu`, `u`; unit `n`, `ty`, `a`, `w`, `c`, `io`; IO `r`, `t`, `f`, `b`, `l`, `e`), defaults left out.
-- Units are keyed `"1"`-`"255"`. The IO key is its name (at most 31 bytes).
+- Units are keyed `"1"`-`"255"`. The IO key is its name (at most 31 bytes). IO names and `id` may not contain `/`, `+`, `#` or control characters, because they are used in MQTT topics.
 - `f` is required on every IO: one read code, one write code, or one of each.
 - Unknown keys are rejected, in a file and in a patch. v1 files are rejected.
 - `CONFIG_MANAGER_SCHEMA_VERSION` is 2. `test/schema_check.py` checks v2 and has no pass-through fields left.
@@ -15,7 +15,10 @@ The full design is in [docs/V2_PLAN.md](docs/V2_PLAN.md). Not compatible with v1
 ### API
 - `config_manager_apply_patch()` (JSON Merge Patch, RFC 7396) replaces `config_manager_handle_partial_update()` and `config_manager_delete_unit()`.
 - `config_manager_build_state()` replaces `config_manager_get_all_unit_hashes()` and `config_manager_compute_configure_units_hash()`.
-- `config_manager_get_payload()` replaces `config_manager_get_units_payload()`.
+- `config_manager_get_payload()` replaces `config_manager_get_units_payload()`. Its result is allocated by the library (freed with `free()`), not through cJSON's hooks.
+- A `set` body with the root key `s` is a complete file that replaces the stored one (no merge, stored file not read). Without `s` it is a merge patch.
+- New: `config_manager_is_fallback()`, `config_manager_copy_string()`, `config_manager_set_live_value()`, `config_manager_get_live_value()` (by unit key). `config_manager_get_string()` and the index-based live-value calls are only safe while holding `config_manager_lock()`.
+- A `config_manager_load()` that times out on the lock is retried by the next state, sync or set.
 - New: `config_manager_find_unit()`, `config_manager_build_limits()`.
 - `config_manager_handle_sync()` compares the root hash only.
 - `config_manager_get_unit_json()` takes the numeric unit key.
@@ -33,11 +36,16 @@ The full design is in [docs/V2_PLAN.md](docs/V2_PLAN.md). Not compatible with v1
 - After a patch the state lists the changed units in `u`, and leaves `u` out when no unit changed.
 - An unreadable config file (not JSON, empty, invalid, over the quota) no longer leaves the library without a config: `config_manager_load()` logs a warning, runs on the default (`v` 0, no units) in RAM and returns `ESP_OK`, keeping the bad file. `config_manager_apply_patch()` then merges onto that default, so the server's full config repairs the file.
 - Out of memory while reading the file no longer looks like a missing file (which wrote the factory default over a good config).
+- A stored file larger than `CONFIG_MANAGER_MAX_FILE_SIZE` is refused before it is read into RAM and treated as unusable (fallback), instead of failing with out of memory on every boot.
+- While running on the fallback, `get_config_json()`, `get_unit_json()` and `get_payload()` answer from the default in RAM, not from the bad file.
+- If the config cannot be reloaded after a rejected patch, `apply_patch()`, `build_state()` and `handle_sync()` load it again, so the pending `err` is still published and later patches are accepted.
+- `err` mapping matches rule_manager: only file errors are `fs`; a lock timeout records nothing; a pending `err` is also included in `build_state(true)`.
 - The v2 file has its own path (`/spiffs/config_v2.json`). The factory default is `s`, `v:0`, device ID, default name, no units. The v1 file is deleted after the first successful v2 save or patch.
 
 ### Kconfig
 - `CONFIG_MANAGER_FILE_PATH` default is `/spiffs/config_v2.json`.
-- New: `CONFIG_MANAGER_V1_FILE_PATH` (`/spiffs/config.json`), `CONFIG_MANAGER_MAX_IOS` (120), `CONFIG_MANAGER_MAX_FILE_SIZE` (5800).
+- New: `CONFIG_MANAGER_V1_FILE_PATH` (`/spiffs/config.json`), `CONFIG_MANAGER_MAX_IOS` (100), `CONFIG_MANAGER_MAX_FILE_SIZE` (4800), chosen so a load or update stays within 50 kB on the ESP32-C6. The ESP32-C5 with PSRAM sets 600 / 28000 in the application.
+- The `CONFIG_MANAGER_ALLOC` help now says it covers the library's own buffers only; cJSON trees follow the application's cJSON hooks.
 
 ## 1.0.0 (unreleased): schema v1
 

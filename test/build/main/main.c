@@ -14,4 +14,10 @@ void app_main(void)
     cJSON_Delete(config_manager_get_unit_json(1));
     free(config_manager_get_payload("{}"));
     config_manager_handle_sync("{\"v\":0,\"h\":\"00000000\"}");
+    char name[40];
+    float f;
+    config_manager_copy_string("name", name, sizeof(name));
+    config_manager_set_live_value(1, "x", 1.0f);
+    config_manager_get_live_value(1, "x", &f);
+    (void)config_manager_is_fallback();
 }

@@ -17,15 +17,21 @@ menu "Config Manager Configuration"
             Path of the schema v1 config file. After a v2 config has been saved and loaded without error,
             this file is deleted. Leave empty to never delete anything. At most 63 characters.
 
+    # REVIEW: help corrected: this covers the library's own buffers only; cJSON trees follow the app's cJSON hooks.
     choice CONFIG_MANAGER_ALLOC
-        prompt "Heap placement for the parsed config and JSON buffers"
+        prompt "Heap placement for the config struct and file/text buffers"
         default CONFIG_MANAGER_ALLOC_PREFER_SPIRAM
+        help
+            Covers what the library allocates itself: system_config_t, the IO pool, the file text, the output
+            buffer and the get/data payload. The cJSON trees (the largest part of a load or patch) are allocated
+            through cJSON's hooks; on a chip with PSRAM the application must install cJSON_InitHooks() that
+            prefer PSRAM, or those trees land in internal RAM.
 
         config CONFIG_MANAGER_ALLOC_PREFER_SPIRAM
             bool "Prefer external RAM (PSRAM) if available"
             help
-                With CONFIG_SPIRAM enabled, allocate from PSRAM and fall back to internal RAM.
-                Without PSRAM (e.g. ESP32-C6) this is plain malloc().
+                With CONFIG_SPIRAM enabled, allocate the library's buffers from PSRAM and fall back to internal RAM.
+                Without PSRAM (e.g. ESP32-C6) this is plain malloc(). cJSON trees are not affected.
 
         config CONFIG_MANAGER_ALLOC_INTERNAL
             bool "Internal RAM only"
@@ -47,19 +53,19 @@ menu "Config Manager Configuration"
         help
             Most entries in cu. A config or patch with more is rejected (quota). Reported as cfg.cu in v2/caps.
 
-    # REVIEW: new quota; 120 fits the 50 kB load/update budget on the ESP32-C6 (plan section 7).
+    # REVIEW: 100 (was 120) so a load or update stays within the 50 kB budget on the ESP32-C6 (user decision).
     config CONFIG_MANAGER_MAX_IOS
         int "Maximum IOs, all units together"
-        default 120
+        default 100
         range 1 4096
         help
             Most IOs over all units. A config or patch with more is rejected (quota). Reported as cfg.io in v2/caps.
             The ESP32-C5 with PSRAM (MIOT_GW_NTN) is planned at 600.
 
-    # REVIEW: new quota; the peak RAM of a load or update is about 8.5x this (plan section 7).
+    # REVIEW: 4800 (was 5800) for the 50 kB budget on the ESP32-C6 (user decision); peak is about 8.5x this plus the IO pool.
     config CONFIG_MANAGER_MAX_FILE_SIZE
         int "Maximum config file size (bytes of compact JSON)"
-        default 5800
+        default 4800
         range 256 262144
         help
             Largest config file in bytes of compact JSON. A config or patch whose result is larger is rejected

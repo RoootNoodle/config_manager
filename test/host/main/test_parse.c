@@ -231,6 +231,18 @@ TEST(parse, invalid_values_rejected)
     TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, save_with("", "1",
         "{\"n\":\"x\",\"a\":5,\"io\":{\"\":{\"r\":1,\"t\":\"u16\",\"f\":[3]}}}"));
 
+    // REVIEW: finding 4: IO names and the device ID go into MQTT topics: no '/', '+', '#' or control characters
+    static const char *const bad_names[] = {"a/b", "a+", "#", "a\\tb", "a\\u007fb", "a\\u0001"};
+    for (size_t i = 0; i < sizeof(bad_names) / sizeof(bad_names[0]); i++) {
+        char unit[128];
+        snprintf(unit, sizeof(unit), "{\"n\":\"x\",\"a\":5,\"io\":{\"%s\":{\"r\":1,\"t\":\"u16\",\"f\":[3]}}}", bad_names[i]);
+        TEST_ASSERT_EQUAL_MESSAGE(ESP_ERR_INVALID_ARG, save_with("", "1", unit), bad_names[i]);
+    }
+    TEST_ASSERT_EQUAL(ESP_OK, save_with("", "1",
+        "{\"n\":\"a/b + #\",\"a\":5,\"io\":{\"temp_\u00b0C-1.x\":{\"r\":1,\"t\":\"u16\",\"f\":[3]}}}"));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, config_manager_save("{\"s\":2,\"v\":1,\"id\":\"a/b\",\"n\":\"g\",\"u\":{}}"));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, config_manager_save("{\"s\":2,\"v\":1,\"id\":\"a#\",\"n\":\"g\",\"u\":{}}"));
+
     // Unit keys "1"-"255" only
     TEST_ASSERT_EQUAL(ESP_OK, save_with("", "255", UNIT_OK));
     static const char *const bad_keys[] = {"0", "256", "01", "unit_1", "", "1a", "-1", "1000"};
