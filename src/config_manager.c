@@ -7,6 +7,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "mbedtls/md.h"
+// IDF 6 / mbedTLS 4: MBEDTLS_ERR_MD_ALLOC_FAILED expands to a PSA error code that md.h does not declare.
+#include "psa/crypto.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
