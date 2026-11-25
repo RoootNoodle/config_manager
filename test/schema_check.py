@@ -15,7 +15,6 @@ import sys
 import jsonschema
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-# REVIEW: v2 drops every pass-through field; the parser reads (or hashes) every key the schema defines.
 SCHEMA_VERSION = 2
 
 # Per schema level: fields read by the C parser / fields only stored in the JSON file
@@ -57,7 +56,6 @@ def main():
         for e in validator.iter_errors(json.loads(path.read_text())):
             errors.append(f"{label}: {'/'.join(map(str, e.path)) or '<root>'}: {e.message}")
 
-    # REVIEW: documents the schema must reject; IO names and the device ID end up in MQTT topics.
     example = json.loads((schema_dir / "config_example.json").read_text())
     must_fail = {}
     for bad in ["a/b", "a+b", "a#", "a\tb", "a\u007fb"]:

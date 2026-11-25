@@ -62,7 +62,7 @@ TEST(parse, example_config)
     TEST_ASSERT_EQUAL_UINT8(4, level->length);
     TEST_ASSERT_EQUAL_UINT8(0, level->start_byte);
     TEST_ASSERT_EQUAL(IO_VTYPE_FP32, level->value_type);
-    TEST_ASSERT_TRUE(level->big_endian);
+    TEST_ASSERT_EQUAL(IO_ORDER_ABCD, level->byte_order);
     TEST_ASSERT_EQUAL_UINT8(3, level->read_fc);
     TEST_ASSERT_EQUAL_UINT8(0, level->write_fc);
     TEST_ASSERT_TRUE(isnan(level->live_value));
@@ -87,7 +87,8 @@ TEST(parse, every_default)
         "{\"s\":2,\"v\":3,\"id\":\"d\",\"n\":\"g\",\"u\":{\"7\":{\"n\":\"x\",\"a\":2,\"io\":{"
         "\"a\":{\"r\":1,\"t\":\"u16\",\"f\":[3]},\"b\":{\"r\":2,\"t\":\"i16\",\"f\":[4]},"
         "\"c\":{\"r\":3,\"t\":\"u32\",\"f\":[3]},\"d\":{\"r\":4,\"t\":\"i32\",\"f\":[3]},"
-        "\"e\":{\"r\":5,\"t\":\"f32\",\"f\":[3]},\"f\":{\"r\":6,\"t\":\"bool\",\"f\":[1]}}}}}"));
+        "\"e\":{\"r\":5,\"t\":\"f32\",\"f\":[3]},\"f\":{\"r\":6,\"t\":\"bool\",\"f\":[1]},"
+        "\"g\":{\"r\":7,\"t\":\"f64\",\"f\":[4]}}}}}"));
     const system_config_t *cfg = config_manager_get_ptr();
     TEST_ASSERT_NOT_NULL(cfg);
     TEST_ASSERT_FALSE(cfg->gps_enabled);
@@ -98,14 +99,15 @@ TEST(parse, every_default)
     static const struct { const char *n; io_value_type_t t; uint8_t l; } exp[] = {
         {"a", IO_VTYPE_UINT16, 2}, {"b", IO_VTYPE_INT16, 2}, {"c", IO_VTYPE_UINT32, 4},
         {"d", IO_VTYPE_INT32, 4}, {"e", IO_VTYPE_FP32, 4}, {"f", IO_VTYPE_BOOL, 2},
+        {"g", IO_VTYPE_FP64, 8},
     };
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < 7; i++) {
         const io_config_t *io = find_io(cfg, 7, exp[i].n);
         TEST_ASSERT_NOT_NULL_MESSAGE(io, exp[i].n);
         TEST_ASSERT_EQUAL_MESSAGE(exp[i].t, io->value_type, exp[i].n);
         TEST_ASSERT_EQUAL_UINT8_MESSAGE(exp[i].l, io->length, exp[i].n);
         TEST_ASSERT_EQUAL_UINT8(0, io->start_byte);
-        TEST_ASSERT_TRUE(io->big_endian);
+        TEST_ASSERT_EQUAL(IO_ORDER_ABCD, io->byte_order);
     }
     config_manager_release();
 }
@@ -128,12 +130,31 @@ TEST(parse, explicit_values)
     TEST_ASSERT_EQUAL_UINT8(6, x->write_fc);
     TEST_ASSERT_EQUAL_UINT8(3, x->start_byte);
     TEST_ASSERT_EQUAL_UINT8(8, x->length);
-    TEST_ASSERT_FALSE(x->big_endian);
+    TEST_ASSERT_EQUAL(IO_ORDER_DCBA, x->byte_order);
     const io_config_t *y = find_io(cfg, 200, "y");
     TEST_ASSERT_EQUAL_UINT8(4, y->read_fc);
     TEST_ASSERT_EQUAL_UINT8(16, y->write_fc);
-    TEST_ASSERT_TRUE(y->big_endian);
+    TEST_ASSERT_EQUAL(IO_ORDER_ABCD, y->byte_order);
     TEST_ASSERT_EQUAL_UINT16(7, cfg->configure_units[0].address_register);
+    config_manager_release();
+}
+
+TEST(parse, byte_orders)
+{
+    TEST_ASSERT_EQUAL(ESP_OK, save_with("", "1",
+        "{\"n\":\"x\",\"a\":5,\"io\":{"
+        "\"p\":{\"r\":1,\"t\":\"f32\",\"f\":[4],\"e\":\"ws\"},"
+        "\"q\":{\"r\":3,\"t\":\"u32\",\"f\":[3],\"e\":\"bs\"},"
+        "\"s\":{\"r\":5,\"t\":\"f64\",\"f\":[4,16],\"e\":\"ws\"}}}"));
+    const system_config_t *cfg = config_manager_get_ptr();
+    TEST_ASSERT_NOT_NULL(cfg);
+    TEST_ASSERT_EQUAL(IO_ORDER_CDAB, find_io(cfg, 1, "p")->byte_order);
+    TEST_ASSERT_EQUAL(IO_ORDER_BADC, find_io(cfg, 1, "q")->byte_order);
+    const io_config_t *s = find_io(cfg, 1, "s");
+    TEST_ASSERT_EQUAL(IO_VTYPE_FP64, s->value_type);
+    TEST_ASSERT_EQUAL(IO_ORDER_CDAB, s->byte_order);
+    TEST_ASSERT_EQUAL_UINT8(8, s->length);
+    TEST_ASSERT_EQUAL_UINT8(16, s->write_fc);
     config_manager_release();
 }
 
@@ -164,7 +185,6 @@ TEST(parse, v1_file_rejected)
     free(before);
     free(after);
 
-    // REVIEW: a v1 file at the v2 path is not parsed; the library runs on the default (v0) with the v1 device_ID.
     write_text_file(CONFIG_MANAGER_FILE_PATH, v1);
     config_manager_unload();
     TEST_ASSERT_EQUAL(ESP_OK, config_manager_load());
@@ -218,6 +238,8 @@ TEST(parse, invalid_values_rejected)
         "{\"r\":1,\"t\":\"u16\",\"f\":[3],\"b\":256}",
         "{\"r\":1,\"t\":\"u16\",\"f\":[3],\"e\":\"little\"}",
         "{\"r\":1,\"t\":\"u16\",\"f\":[3],\"e\":1}",
+        "{\"r\":1,\"t\":\"u16\",\"f\":[3],\"e\":\"WS\"}",
+        "{\"r\":1,\"t\":\"F64\",\"f\":[3]}",
         "5",
     };
     for (size_t i = 0; i < sizeof(bad_io) / sizeof(bad_io[0]); i++)
@@ -231,7 +253,6 @@ TEST(parse, invalid_values_rejected)
     TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, save_with("", "1",
         "{\"n\":\"x\",\"a\":5,\"io\":{\"\":{\"r\":1,\"t\":\"u16\",\"f\":[3]}}}"));
 
-    // REVIEW: finding 4: IO names and the device ID go into MQTT topics: no '/', '+', '#' or control characters
     static const char *const bad_names[] = {"a/b", "a+", "#", "a\\tb", "a\\u007fb", "a\\u0001"};
     for (size_t i = 0; i < sizeof(bad_names) / sizeof(bad_names[0]); i++) {
         char unit[128];
@@ -378,6 +399,7 @@ TEST_GROUP_RUNNER(parse)
     RUN_TEST_CASE(parse, example_config);
     RUN_TEST_CASE(parse, every_default);
     RUN_TEST_CASE(parse, explicit_values);
+    RUN_TEST_CASE(parse, byte_orders);
     RUN_TEST_CASE(parse, unknown_keys_rejected);
     RUN_TEST_CASE(parse, v1_file_rejected);
     RUN_TEST_CASE(parse, function_codes);

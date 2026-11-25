@@ -39,11 +39,11 @@ The design, the MQTT messages and the reasons behind v2 are in [V2_PLAN.md](V2_P
 | unit | `c` | NB-IoT interval, seconds, 1–65535 | 300 | `nbiot_interval_s` |
 | unit | `io` | IOs; the key is the name, 1–31 bytes, no `/`, `+`, `#` or control characters (0x00–0x1F, 0x7F) | required (may be empty) | `io_pool[]`, sorted by name |
 | IO | `r` | register 0–65535 | required | `read_addr` |
-| IO | `t` | `u16` `i16` `u32` `i32` `f32` `bool` | required | `value_type` |
+| IO | `t` | `u16` `i16` `u32` `i32` `f32` `f64` `bool` | required | `value_type` |
 | IO | `f` | one read code (1–4), one write code (5, 6, 15, 16), or one of each | required | `read_fc`, `write_fc` |
-| IO | `b` | start byte 0–255 | 0 | `start_byte` |
-| IO | `l` | length 1–8 | 2 for 16-bit and `bool`, 4 for 32-bit | `length` |
-| IO | `e` | `"l"` little-endian, `"b"` big-endian | big-endian | `big_endian` |
+| IO | `b` | start byte 0–255: position of the value in the Modbus response (slave = 0, FC = 1, byte count = 2, first data byte = 3); 0–3 all mean the first data byte | 0 | `start_byte` |
+| IO | `l` | length 1–8 | 2 for 16-bit and `bool`, 4 for 32-bit, 8 for `f64` | `length` |
+| IO | `e` | byte order: `"b"` ABCD (big endian), `"l"` DCBA (all bytes reversed), `"ws"` CDAB (word order reversed), `"bs"` BADC (bytes swapped in each word) | `"b"` | `byte_order` |
 
 Also rejected: unknown keys at any level, duplicate keys in one object, numbers that are not whole, and a file over the quotas below.
 

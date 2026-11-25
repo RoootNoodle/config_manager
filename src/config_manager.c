@@ -36,7 +36,6 @@ static SemaphoreHandle_t s_config_mux = NULL;
 
 static system_config_t *g_config = NULL;
 
-// REVIEW: build_state(false) has no other way to learn what the last apply_patch did, so it is kept here until reported once.
 static struct {
     bool        pending;
     const char *err;            // NULL when the patch was applied
@@ -50,14 +49,15 @@ static const char *const IO_KEYS[]   = {"r", "t", "f", "b", "l", "e", NULL};
 static const char *const VTYPE_NAMES[] = {
     [IO_VTYPE_UINT16] = "u16", [IO_VTYPE_INT16] = "i16", [IO_VTYPE_UINT32] = "u32",
     [IO_VTYPE_INT32]  = "i32", [IO_VTYPE_FP32]  = "f32", [IO_VTYPE_BOOL]   = "bool",
+    [IO_VTYPE_FP64]   = "f64",
+};
+static const char *const ORDER_NAMES[] = {
+    [IO_ORDER_ABCD] = "b", [IO_ORDER_DCBA] = "l", [IO_ORDER_CDAB] = "ws", [IO_ORDER_BADC] = "bs",
 };
 
 static esp_err_t load_locked(const char *known_id);
 
-// REVIEW: set while the RAM config is the default standing in for an unreadable file; apply_patch then merges onto that default.
 static bool s_file_bad = false;
-// REVIEW: set once the application asked for a config (load/save/reset); while set, a NULL g_config is retried, never permanent.
-// REVIEW: atomic because config_manager_load() sets it before it has the lock (a lock timeout must still lead to a retry).
 static atomic_bool s_config_wanted = false;
 // Device ID of the last config installed, for the fallback and the retry after g_config was lost
 static char s_device_id[MAX_NAME_LEN] = "";
@@ -89,7 +89,6 @@ static void free_config_struct(system_config_t *cfg)
 // File I/O
 // ---------------------------------------------------------------------------
 
-// REVIEW: status tells "missing" (ESP_ERR_NOT_FOUND) apart from empty/unreadable and out of memory, so OOM never looks like a missing file.
 static char *read_file(const char *path, size_t *len_out, esp_err_t *status)
 {
     esp_err_t st = ESP_OK;
@@ -108,7 +107,6 @@ static char *read_file(const char *path, size_t *len_out, esp_err_t *status)
         if (status) *status = ESP_ERR_INVALID_SIZE;
         return NULL;
     }
-    // REVIEW: checked before allocating, so an oversized file is "unusable" (fallback) instead of an endless out-of-memory.
     if (size > MAX_FILE_SIZE) {
         ESP_LOGW(TAG, "%s is %ld B, over CONFIG_MANAGER_MAX_FILE_SIZE (%d)", path, size, MAX_FILE_SIZE);
         fclose(f);
@@ -141,7 +139,6 @@ static char *read_config_text(size_t *len_out, esp_err_t *status)
     return text;
 }
 
-// REVIEW: the file text is freed right after parsing so text and tree do not stay allocated together.
 static cJSON *load_config_file(void)
 {
     char *text = read_config_text(NULL, NULL);
@@ -171,7 +168,6 @@ static esp_err_t write_config_file(const char *json_str)
     return ESP_OK;
 }
 
-// REVIEW: plan section 6 step 4; called only after a v2 config from save/patch was written and activated.
 static void remove_v1_file(void)
 {
     static const char v1_path[] = CONFIG_MANAGER_V1_FILE_PATH;
@@ -181,7 +177,6 @@ static void remove_v1_file(void)
     xSemaphoreGiveRecursive(s_file_mux);
 }
 
-// REVIEW: a fixed buffer of MAX_FILE_SIZE both enforces the size quota and avoids cJSON's realloc doubling.
 static esp_err_t serialize_bounded(const cJSON *tree, char **out)
 {
     // cJSON_PrintPreallocated needs a few spare bytes beyond the output
@@ -230,7 +225,6 @@ static bool keys_allowed(const cJSON *obj, const char *const *allowed, const cha
     return true;
 }
 
-// REVIEW: cJSON keeps duplicate keys; reject them so the hash and the parser cannot see different values.
 static bool has_duplicate_keys(const cJSON *obj, const char *where)
 {
     for (const cJSON *a = obj->child; a; a = a->next) {
@@ -254,7 +248,6 @@ static bool object_ok(const cJSON *obj, const char *const *allowed, const char *
     return !allowed || keys_allowed(obj, allowed, where);
 }
 
-// REVIEW: only canonical "1"-"255" (no leading zero), so a key string maps to exactly one number.
 static bool parse_unit_key(const char *s, uint8_t *out)
 {
     if (!s || s[0] < '1' || s[0] > '9') return false;
@@ -277,8 +270,6 @@ static bool parse_vtype(const char *s, io_value_type_t *out)
     return false;
 }
 
-// REVIEW: IO names and the device ID end up in MQTT topics (sense/control, devices/{id}), so topic separators,
-// wildcards and control characters are not allowed in them.
 static bool topic_safe(const char *s)
 {
     for (; *s; s++) {
@@ -320,7 +311,6 @@ static esp_err_t parse_io(const cJSON *io_json, io_config_t *io)
         return ESP_ERR_INVALID_ARG;
     }
 
-    // REVIEW: f is required; at most one read code and one write code (plan section 2).
     const cJSON *f = cJSON_GetObjectItemCaseSensitive(io_json, "f");
     int n_codes = cJSON_IsArray(f) ? cJSON_GetArraySize(f) : 0;
     if (n_codes < 1 || n_codes > 2) {
@@ -350,16 +340,21 @@ static esp_err_t parse_io(const cJSON *io_json, io_config_t *io)
         return ESP_ERR_INVALID_ARG;
     }
     bool wide = io->value_type == IO_VTYPE_UINT32 || io->value_type == IO_VTYPE_INT32 || io->value_type == IO_VTYPE_FP32;
-    io->length = item ? (uint8_t)v : (wide ? 4 : 2);
+    io->length = item ? (uint8_t)v : (io->value_type == IO_VTYPE_FP64 ? 8 : (wide ? 4 : 2));
 
-    // REVIEW: "b" is accepted as well as "l" because the hash writes the default out as "b".
     item = cJSON_GetObjectItemCaseSensitive(io_json, "e");
     const char *e = cJSON_GetStringValue(item);
-    if (item && (!e || (strcmp(e, "l") != 0 && strcmp(e, "b") != 0))) {
-        ESP_LOGW(TAG, "Rejected: IO '%s': e must be \"l\" or \"b\"", name);
-        return ESP_ERR_INVALID_ARG;
+    io->byte_order = IO_ORDER_ABCD;
+    if (item) {
+        bool found = false;
+        for (int i = 0; e && i < (int)(sizeof(ORDER_NAMES) / sizeof(ORDER_NAMES[0])); i++) {
+            if (strcmp(e, ORDER_NAMES[i]) == 0) { io->byte_order = (io_byte_order_t)i; found = true; break; }
+        }
+        if (!found) {
+            ESP_LOGW(TAG, "Rejected: IO '%s': e must be \"b\", \"l\", \"ws\" or \"bs\"", name);
+            return ESP_ERR_INVALID_ARG;
+        }
     }
-    io->big_endian = !(e && strcmp(e, "l") == 0);
     return ESP_OK;
 }
 
@@ -397,7 +392,6 @@ static esp_err_t parse_unit(const cJSON *uj, unit_config_t *u, io_config_t *io_p
         ESP_LOGW(TAG, "Rejected: %s: a missing or not 2..247", where);
         return ESP_ERR_INVALID_ARG;
     }
-    // REVIEW: interval range 1..65535 (uint16_t field, v1 schema minimum 1); the plan gives no range.
     if ((item = cJSON_GetObjectItemCaseSensitive(uj, "w")) && !get_int(item, 1, 65535, &w)) {
         ESP_LOGW(TAG, "Rejected: %s: w not 1..65535", where);
         return ESP_ERR_INVALID_ARG;
@@ -431,7 +425,6 @@ static esp_err_t parse_unit(const cJSON *uj, unit_config_t *u, io_config_t *io_p
     return ESP_OK;
 }
 
-// REVIEW: one function checks the whole v2 file; counts come back so build_config allocates exactly once.
 static esp_err_t validate_config(const cJSON *root, int *unit_count, int *io_count, int *cu_count)
 {
     if (!object_ok(root, ROOT_KEYS, "root")) return ESP_ERR_INVALID_ARG;
@@ -451,7 +444,6 @@ static esp_err_t validate_config(const cJSON *root, int *unit_count, int *io_cou
         return ESP_ERR_INVALID_ARG;
     }
     const char *n = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(root, "n"));
-    // REVIEW: the 39 limit is counted in bytes, which is what name[40] can hold.
     if (!n || strlen(n) > GW_NAME_MAX) {
         ESP_LOGW(TAG, "Rejected: n missing, not a string or over %d bytes", GW_NAME_MAX);
         return ESP_ERR_INVALID_ARG;
@@ -498,7 +490,6 @@ static esp_err_t validate_config(const cJSON *root, int *unit_count, int *io_cou
         n_units++;
     }
 
-    // REVIEW: quota reported as ESP_ERR_INVALID_SIZE, which becomes "err":"q" (plan section 7).
     if (n_units > MAX_UNITS || n_ios > MAX_IOS || cus > MAX_CONFIGURE_UNITS) {
         ESP_LOGW(TAG, "Rejected: quota (units %d/%d, IOs %d/%d, cu %d/%d)",
                  n_units, MAX_UNITS, n_ios, MAX_IOS, cus, MAX_CONFIGURE_UNITS);
@@ -544,7 +535,6 @@ static void hw_int(hash_writer_t *w, long v)
     hw_put(w, tmp, (size_t)n);
 }
 
-// REVIEW: same escaping as Python json.dumps(ensure_ascii=False): only ", \ and control characters.
 static void hw_str(hash_writer_t *w, const char *s)
 {
     hw_put(w, "\"", 1);
@@ -605,7 +595,7 @@ static uint32_t hash_unit(hash_writer_t *w, const cJSON *uj, const unit_config_t
         if (i) hw_puts(w, ",");
         hw_str(w, io->name);
         hw_puts(w, ":{\"b\":"); hw_int(w, io->start_byte);
-        hw_puts(w, io->big_endian ? ",\"e\":\"b\",\"f\":[" : ",\"e\":\"l\",\"f\":[");
+        hw_puts(w, ",\"e\":\""); hw_puts(w, ORDER_NAMES[io->byte_order]); hw_puts(w, "\",\"f\":[");
         // Read codes (1-4) are always lower than write codes, so this is ascending
         if (io->read_fc) hw_int(w, io->read_fc);
         if (io->read_fc && io->write_fc) hw_puts(w, ",");
@@ -650,7 +640,6 @@ static uint32_t hash_root(hash_writer_t *w, const cJSON *root, const system_conf
     hw_puts(w, ",\"id\":");   hw_str(w, cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(root, "id")));
     hw_puts(w, ",\"n\":");    hw_str(w, cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(root, "n")));
     hw_puts(w, ",\"s\":2,\"u\":{");
-    // REVIEW: unit keys sorted as strings here ("10" < "2"), unlike units[] which is numeric.
     const cJSON *units = cJSON_GetObjectItemCaseSensitive(root, "u");
     bool first = true;
     for (const cJSON *uj = next_sorted(units, NULL); uj; uj = next_sorted(units, uj)) {
@@ -695,7 +684,6 @@ static esp_err_t build_config(const cJSON *root, int io_count, int cu_count, sys
     const cJSON *gps = cJSON_GetObjectItemCaseSensitive(root, "gps");
     cfg->gps_enabled = gps && gps->valuedouble == 1;
 
-    // REVIEW: insertion by numeric key so units[] is sorted and find_unit is a short loop (plan section 8).
     const cJSON *units = cJSON_GetObjectItemCaseSensitive(root, "u");
     const cJSON *uj;
     cJSON_ArrayForEach(uj, units) {
@@ -738,7 +726,6 @@ static esp_err_t build_config(const cJSON *root, int io_count, int cu_count, sys
     }
 
     cfg->hash = hash_root(w, root, cfg);
-    // REVIEW: not ESP_FAIL, which is reserved for file errors ("fs"); a hash context without memory is "mem".
     ESP_GOTO_ON_FALSE(w->rc == 0, w->rc == MBEDTLS_ERR_MD_ALLOC_FAILED ? ESP_ERR_NO_MEM : ESP_ERR_INVALID_RESPONSE,
                       fail, TAG, "SHA-256 failed: -0x%04x", (unsigned)-w->rc);
 
@@ -776,7 +763,6 @@ static void install_config(system_config_t *cfg, bool file_bad)
 }
 
 
-// REVIEW: takes ownership of root and frees it before the file write, so tree and text never sit beside a second tree.
 // Caller holds the config lock. On error the active config is left as it was.
 static esp_err_t commit_tree(cJSON *root)
 {
@@ -838,7 +824,6 @@ esp_err_t config_manager_deinit(void)
     return ESP_OK;
 }
 
-// REVIEW: factory default per plan section 6 step 1: s, v:0, device ID, default name, no units (cu and gps left out).
 static cJSON *make_default_tree(const char *device_id)
 {
     cJSON *root = cJSON_CreateObject();
@@ -872,7 +857,6 @@ static esp_err_t reset_locked(const char *device_id)
     return ret;
 }
 
-// REVIEW: an unreadable file is handled like a missing one (plan section 6), but only in RAM: the bad file stays until a valid config is saved.
 // The device ID is taken from the bad file if it still has one ("id", or v1 "device_ID"), else known_id, else the config in RAM.
 static esp_err_t fallback_locked(const cJSON *bad_root, const char *reason, const char *known_id)
 {
@@ -882,7 +866,6 @@ static esp_err_t fallback_locked(const cJSON *bad_root, const char *reason, cons
     if (!id) id = known_id;
     if (!id && g_config) id = g_config->device_id;
     if (!id) id = s_device_id;
-    // REVIEW: an ID that may not appear in a topic would make the default itself invalid, so it is dropped.
     if (id && topic_safe(id)) strncpy(device_id, id, MAX_NAME_LEN - 1);
 
     if (reason)
@@ -911,7 +894,6 @@ static esp_err_t load_locked(const char *known_id)
             ESP_LOGW(TAG, "No config at %s, writing factory defaults", CONFIG_MANAGER_FILE_PATH);
             return reset_locked(NULL);
         }
-        // REVIEW: out of memory or a lock timeout says nothing about the file, so the RAM config is left as it is.
         if (st == ESP_ERR_NO_MEM || st == ESP_ERR_TIMEOUT) return st;
         return fallback_locked(NULL, st == ESP_ERR_INVALID_SIZE ? "empty or over CONFIG_MANAGER_MAX_FILE_SIZE" : "unreadable",
                                known_id);
@@ -938,7 +920,6 @@ static esp_err_t load_locked(const char *known_id)
     return ESP_OK;
 }
 
-// REVIEW: called where the server talks to the library; recovers from a reload that failed after a rejected patch.
 static void ensure_config_locked(void)
 {
     if (g_config || !atomic_load(&s_config_wanted)) return;
@@ -950,7 +931,6 @@ static void ensure_config_locked(void)
 esp_err_t config_manager_load(void)
 {
     if (!s_file_mux) return ESP_ERR_INVALID_STATE;
-    // REVIEW: set before the lock so that even a lock timeout here is retried by the next state, sync or set.
     atomic_store(&s_config_wanted, true);
     if (!take_config(LOCK_TIMEOUT_MS)) return ESP_ERR_TIMEOUT;
     esp_err_t ret = load_locked(NULL);
@@ -1083,7 +1063,6 @@ esp_err_t config_manager_copy_string(const char *key, char *out, size_t out_size
     else                                    ret = ESP_ERR_NOT_FOUND;
     if (src) {
         size_t len = strlen(src);
-        // REVIEW: all or nothing: a value that does not fit leaves "" rather than a truncated name or ID.
         if (len >= out_size) ret = ESP_ERR_INVALID_SIZE;
         else memcpy(out, src, len + 1);
     }
@@ -1104,7 +1083,6 @@ int config_manager_find_unit(uint8_t unit_key)
     return idx;
 }
 
-// REVIEW: get_payload's result is documented as free(); cJSON's allocator may be replaced by app hooks, so copy into cm_malloc.
 static char *print_for_free(const cJSON *tree)
 {
     char *tmp = cJSON_PrintUnformatted(tree);
@@ -1116,7 +1094,6 @@ static char *print_for_free(const cJSON *tree)
     return out;
 }
 
-// REVIEW: while the file is unusable, readers get the default in RAM, so get/data agree with the published h.
 // *bad tells the caller which one it is; returns false on a lock timeout (nothing should be read then).
 static bool fallback_check(bool *bad, char device_id[MAX_NAME_LEN])
 {
@@ -1147,7 +1124,6 @@ cJSON *config_manager_get_unit_json(uint8_t unit_key)
     if (!root) return NULL;
     char key_str[4];
     snprintf(key_str, sizeof(key_str), "%u", unit_key);
-    // REVIEW: detached instead of duplicated so the unit is not copied while the whole tree is still allocated.
     cJSON *unit = cJSON_DetachItemFromObjectCaseSensitive(cJSON_GetObjectItemCaseSensitive(root, "u"), key_str);
     cJSON_Delete(root);
     return unit;
@@ -1170,7 +1146,6 @@ char *config_manager_get_payload(const char *request_json)
         return NULL;
     }
 
-    // REVIEW: {} returns the stored file text as-is; it is already compact JSON, so no tree is built.
     if (!u_req && !cu_req) {
         cJSON_Delete(req);
         bool bad = false;
@@ -1255,7 +1230,6 @@ cJSON *config_manager_build_state(bool all_units)
             ok = cJSON_AddStringToObject(u, key, hex) != NULL;
         }
     } else if (ok && s_patch_result.pending && !s_patch_result.err) {
-        // REVIEW: "u" only when the patch changed a unit; otherwise the state looks like the connect state (user decision).
         bool any = false;
         for (int b = 0; b < 32; b++) any = any || s_patch_result.changed[b] || s_patch_result.deleted[b];
         cJSON *u = any ? cJSON_AddObjectToObject(state, "u") : NULL;
@@ -1305,7 +1279,6 @@ cJSON *config_manager_build_limits(void)
 // Patch (v2/cfg/set) and sync
 // ---------------------------------------------------------------------------
 
-// REVIEW: unknown keys are rejected before anything is touched; values are checked on the merged result.
 static bool patch_keys_ok(const cJSON *patch)
 {
     if (!object_ok(patch, ROOT_KEYS, "patch")) return false;
@@ -1347,7 +1320,6 @@ static void strip_nulls(cJSON *obj)
     }
 }
 
-// REVIEW: RFC 7396 merge that moves patch items into the target instead of copying them (no second tree).
 static esp_err_t merge_patch(cJSON *target, cJSON *patch)
 {
     cJSON *item;
@@ -1392,7 +1364,6 @@ static cfg_snapshot_t *take_snapshot(const system_config_t *cfg)
     return snap;
 }
 
-// REVIEW: same key and same hash means the same IOs in the same (sorted) order, so live values carry over by position.
 static void restore_live_values(system_config_t *cfg, const cfg_snapshot_t *snap)
 {
     for (int i = 0; i < snap->unit_count; i++) {
@@ -1419,7 +1390,6 @@ static void record_changes(const system_config_t *cfg, const cfg_snapshot_t *sna
     }
 }
 
-// REVIEW: short err codes decided by the user; same mapping as rule_manager: only ESP_FAIL (file read/write) is "fs".
 static const char *err_text(esp_err_t err)
 {
     switch (err) {
@@ -1448,13 +1418,11 @@ static esp_err_t apply_patch_locked(cJSON *patch, int *old_ver, bool *duplicate)
         ret = ESP_ERR_INVALID_VERSION;
         goto out;
     }
-    // REVIEW: same v = duplicate delivery (QoS 1 redelivery): nothing applied, no err; a different patch with a reused v is ignored too.
     if (v == g_config->version) {
         ESP_LOGI(TAG, "CFG_SET: v%ld already stored, duplicate ignored", v);
         *duplicate = true;
         goto out;
     }
-    // REVIEW: a body with "s" is a complete file that replaces the stored one (user decision); no merge, file not read.
     const cJSON *s_item = cJSON_GetObjectItemCaseSensitive(patch, "s");
     bool full = s_item != NULL;
     long s_val;
@@ -1467,17 +1435,14 @@ static esp_err_t apply_patch_locked(cJSON *patch, int *old_ver, bool *duplicate)
     char device_id[MAX_NAME_LEN];
     memcpy(device_id, g_config->device_id, sizeof(device_id));
 
-    // REVIEW: plan section 8 low-memory order: free the active config, load the file, merge, write, rebuild.
     free_config_struct(g_config);
     g_config = NULL;
     ESP_LOGD(TAG, "CFG_SET: freed active config, heap %zu", free_heap());
 
     if (full) {
-        // REVIEW: the body itself becomes the new file; commit_tree validates it as a complete v2 file.
         root = patch;
         patch = NULL;
     } else {
-        // REVIEW: with an unreadable file the patch merges onto the default in RAM, so a full config from the server repairs it.
         root = s_file_bad ? make_default_tree(device_id) : load_config_file();
         ESP_GOTO_ON_FALSE(cJSON_IsObject(root), ESP_FAIL, restore, TAG, "CFG_SET: could not read %s", CONFIG_MANAGER_FILE_PATH);
         ret = merge_patch(root, patch);
@@ -1496,9 +1461,7 @@ static esp_err_t apply_patch_locked(cJSON *patch, int *old_ver, bool *duplicate)
     goto out;
 
 restore:
-    // REVIEW: the file is untouched on every rejection, so the old config is rebuilt from it.
     cJSON_Delete(root);
-    // REVIEW: while the file is unreadable the default is rebuilt in RAM with the same device ID instead of re-reading the file.
     esp_err_t reload = s_file_bad ? fallback_locked(NULL, NULL, device_id) : load_locked(device_id);
     if (reload == ESP_OK) restore_live_values(g_config, snap);
     else ESP_LOGE(TAG, "CFG_SET: could not reload the stored config");
@@ -1516,7 +1479,6 @@ esp_err_t config_manager_apply_patch(const char *json)
 
     cJSON *patch = cJSON_Parse(json);
     ESP_LOGV(TAG, "CFG_SET: %s", json);
-    // REVIEW: the whole patch runs under the config lock (plan section 8); readers see NULL or time out meanwhile.
     if (!take_config(LOCK_TIMEOUT_MS)) {
         cJSON_Delete(patch);
         return ESP_ERR_TIMEOUT;
@@ -1526,11 +1488,9 @@ esp_err_t config_manager_apply_patch(const char *json)
     bool duplicate = false;
     esp_err_t ret = apply_patch_locked(patch, &old_ver, &duplicate);
 
-    // REVIEW: a lower or missing v is reported with err "v"; a duplicate leaves any unreported patch result in place.
     if (ret == ESP_OK) {
         if (!duplicate) s_patch_result.pending = true;
     } else if (ret != ESP_ERR_INVALID_STATE && ret != ESP_ERR_TIMEOUT) {
-        // REVIEW: a lock timeout records nothing, as in rule_manager.
         memset(&s_patch_result, 0, sizeof(s_patch_result));
         s_patch_result.pending = true;
         s_patch_result.err = err_text(ret);
@@ -1612,7 +1572,6 @@ esp_err_t config_update_live_value(const char *io_name, uint8_t unit_idx, float 
     return ret;
 }
 
-// REVIEW: lookup by unit key and access in one lock hold, so a patch cannot move the unit in between.
 static esp_err_t live_by_key_locked(uint8_t unit_key, const char *io_name, io_config_t **io_out)
 {
     if (!g_config) return ESP_ERR_INVALID_STATE;

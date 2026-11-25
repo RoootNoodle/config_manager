@@ -1,6 +1,8 @@
 # Changelog
 
-## 2.0.0 (unreleased): schema v2
+## 2.0.1 (2026-11-25): schema v2
+
+First release of schema v2. There is no 2.0.0 release; `v2.0.0-rc1` to `rc3` were release candidates.
 
 The full design is in [docs/V2_PLAN.md](docs/V2_PLAN.md). Not compatible with v1 files, topics or call sites.
 
@@ -11,6 +13,8 @@ The full design is in [docs/V2_PLAN.md](docs/V2_PLAN.md). Not compatible with v1
 - `f` is required on every IO: one read code, one write code, or one of each.
 - Unknown keys are rejected, in a file and in a patch. v1 files are rejected.
 - `CONFIG_MANAGER_SCHEMA_VERSION` is 2. `test/schema_check.py` checks v2 and has no pass-through fields left.
+- IO `e` also takes `"ws"` (CDAB, word order reversed) and `"bs"` (BADC, bytes swapped in each word). `"b"` and `"l"` are unchanged, so existing files keep their hashes.
+- IO `t` also takes `f64` (default length 8).
 
 ### API
 - `config_manager_apply_patch()` (JSON Merge Patch, RFC 7396) replaces `config_manager_handle_partial_update()` and `config_manager_delete_unit()`.
@@ -23,6 +27,7 @@ The full design is in [docs/V2_PLAN.md](docs/V2_PLAN.md). Not compatible with v1
 - `config_manager_handle_sync()` compares the root hash only.
 - `config_manager_get_unit_json()` takes the numeric unit key.
 - `config_manager_save()` takes a complete v2 file, validates it and stores it as compact JSON.
+- `io_config_t`: `bool big_endian` is now `io_byte_order_t byte_order` (`IO_ORDER_ABCD`, `IO_ORDER_DCBA`, `IO_ORDER_CDAB`, `IO_ORDER_BADC`). `io_value_type_t` has the new last value `IO_VTYPE_FP64`.
 - `unit_config_t`: `name[40]` is now `uint8_t key`, `hash[65]` is now `uint32_t hash`. `system_config_t`: `system_hash[65]` is now `uint32_t hash`, `configure_units_hash` is removed, `gps_enabled` is new.
 - `units[]` is sorted by key. The IOs of a unit are sorted by name.
 

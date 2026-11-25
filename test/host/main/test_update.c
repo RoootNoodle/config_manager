@@ -7,7 +7,6 @@
 #include "config_manager_priv.h"
 #include "cm_alloc.h"
 
-// REVIEW: expected hashes after each patch come from test/hash_reference.py with an RFC 7396 merge in Python.
 #define H_ROOT_0 "eee9ed4c"
 #define H_UNIT_3 "c1ac7114"
 
@@ -74,7 +73,7 @@ TEST(update, patch_sequence)
     TEST_ASSERT_EQUAL_UINT8(4, cfg->units[2].key);
     TEST_ASSERT_NULL(find_io(cfg, 2, "relay"));
     TEST_ASSERT_NOT_NULL(find_io(cfg, 2, "power"));
-    TEST_ASSERT_FALSE(find_io(cfg, 4, "flow")->big_endian);
+    TEST_ASSERT_EQUAL(IO_ORDER_DCBA, find_io(cfg, 4, "flow")->byte_order);
     uint32_t hash = cfg->hash;
     config_manager_release();
 
@@ -87,7 +86,6 @@ TEST(update, patch_sequence)
     config_manager_release();
 }
 
-// REVIEW: equal v is a duplicate delivery: ESP_OK, nothing applied, next state has neither u nor err.
 TEST(update, duplicate_version)
 {
     const char *body = "{\"v\":2,\"u\":{\"2\":{\"c\":900}}}";
@@ -110,7 +108,6 @@ TEST(update, duplicate_version)
     // The active config was not rebuilt, so live values are untouched
     TEST_ASSERT_EQUAL_FLOAT(5.0f, config_get_live_value("voltage", 1));
 
-    // REVIEW: a duplicate keeps an unreported patch result: redelivery before build_state still reports unit 1.
     TEST_ASSERT_EQUAL(ESP_OK, config_manager_apply_patch("{\"v\":3,\"u\":{\"1\":{\"w\":6}}}"));
     TEST_ASSERT_EQUAL(ESP_OK, config_manager_apply_patch("{\"v\":3,\"u\":{\"1\":{\"w\":6}}}"));
     cJSON *state = config_manager_build_state(false);
@@ -140,9 +137,7 @@ TEST(update, rejected_patch_leaves_file_intact)
         {"{\"v\":2,\"u\":{\"1\":{\"unit_name\":\"x\"}}}", ESP_ERR_INVALID_ARG, "inv"},
         {"{\"v\":2,\"u\":{\"1\":{\"io\":{\"level\":{\"IO_name\":\"x\"}}}}}", ESP_ERR_INVALID_ARG, "inv"},
         {"{\"v\":2,\"u\":{\"unit_1\":null}}", ESP_ERR_INVALID_ARG, "inv"},
-        // REVIEW: finding 4: an IO name that would break the sense/control topic
         {"{\"v\":2,\"u\":{\"1\":{\"io\":{\"a/b\":{\"r\":1,\"t\":\"u16\",\"f\":[3]}}}}}", ESP_ERR_INVALID_ARG, "inv"},
-        // REVIEW: lower or missing v is rejected with "v"; an equal v is a duplicate (test duplicate_version).
         {"{\"v\":0,\"n\":\"X\"}", ESP_ERR_INVALID_VERSION, "v"},
         {"{\"n\":\"X\"}", ESP_ERR_INVALID_VERSION, "v"},
         {"{\"v\":\"2\",\"n\":\"X\"}", ESP_ERR_INVALID_VERSION, "v"},
@@ -245,7 +240,6 @@ static char *full_file(int v, bool with_cu)
     return out;
 }
 
-// REVIEW: a body with "s" replaces the whole file: units it leaves out are deleted (null in the state), nothing is merged.
 TEST(update, full_file_replaces)
 {
     TEST_ASSERT_EQUAL(ESP_OK, config_manager_set_live_value(1, "level", 7.0f));
@@ -420,7 +414,6 @@ static void assert_fallback(const char *device_id)
     cJSON_Delete(state);
 }
 
-// REVIEW: plan section 6 flow for an unreadable file: default v0 in RAM, file kept, full patch accepted and written.
 TEST(update, corrupt_file_falls_back_to_default)
 {
     const char *bad = "{\"s\":2,\"v\":5,\"id\":\"GW-9\",\"n\":";   // truncated
@@ -482,7 +475,6 @@ TEST(update, invalid_or_empty_file_falls_back_to_default)
     free(file);
 }
 
-// REVIEW: finding 1: a file over MAX_FILE_SIZE is refused before allocating and handled as unusable.
 TEST(update, oversized_file_falls_back)
 {
     // A valid v2 file padded with spaces: only its size makes it unusable
@@ -504,7 +496,6 @@ TEST(update, oversized_file_falls_back)
     free(big);
 }
 
-// REVIEW: finding 3: while the file is unusable, get/data answer from the default that h describes.
 TEST(update, get_answers_from_fallback)
 {
     write_text_file(CONFIG_MANAGER_FILE_PATH, "{\"s\":2,\"v\":5,\"id\":\"GW-7\",\"n\":\"g\",\"u\":{\"1\":{\"n\":\"x\"}}}");
@@ -532,7 +523,6 @@ TEST(update, get_answers_from_fallback)
     cJSON_Delete(u);
 }
 
-// REVIEW: finding 2: a reload that fails after a rejected patch is retried, and the pending err is still published.
 TEST(update, failed_reload_recovers)
 {
     // Allocations of a rejected patch: 1 snapshot, 2 file text; the 3rd is the reload's file text
@@ -561,7 +551,6 @@ TEST(update, failed_reload_recovers)
     TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, config_manager_apply_patch("{\"v\":3}"));
 }
 
-// REVIEW: finding 5c: a pending err is kept in the sync-mismatch state, which lists all units.
 TEST(update, err_in_full_state)
 {
     TEST_ASSERT_EQUAL(ESP_ERR_INVALID_VERSION, config_manager_apply_patch("{\"n\":\"x\"}"));
@@ -571,7 +560,6 @@ TEST(update, err_in_full_state)
     assert_state("{\"s\":2,\"v\":1,\"h\":\"" H_ROOT_0 "\"}", config_manager_build_state(false));
 }
 
-// REVIEW: config_manager_is_fallback() and config_manager_copy_string() (user-approved additions).
 TEST(update, is_fallback_and_copy_string)
 {
     TEST_ASSERT_FALSE(config_manager_is_fallback());
@@ -606,7 +594,6 @@ TEST(update, is_fallback_and_copy_string)
     TEST_ASSERT_EQUAL_STRING("", buf);
 }
 
-// REVIEW: live values by unit key (user-approved additions).
 TEST(update, live_values_by_key)
 {
     float f = 1;

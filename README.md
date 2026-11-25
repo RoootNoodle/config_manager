@@ -17,7 +17,7 @@ It has no dependencies on application components and no NVS code. It works on th
 dependencies:
   config_manager:
     git: git@github.com:RoootNoodle/config_manager.git
-    version: v2.0.0
+    version: v2.0.1
 ```
 
 ```c

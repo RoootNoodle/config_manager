@@ -9,8 +9,7 @@ import hashlib
 import json
 import sys
 
-# REVIEW: 16-bit types and bool default to 2 bytes, 32-bit types to 4 (plan section 2, IO table).
-DEFAULT_LENGTH = {"u16": 2, "i16": 2, "bool": 2, "u32": 4, "i32": 4, "f32": 4}
+DEFAULT_LENGTH = {"u16": 2, "i16": 2, "bool": 2, "u32": 4, "i32": 4, "f32": 4, "f64": 8}
 
 
 def canonical(obj):
@@ -22,7 +21,6 @@ def h8(obj):
 
 
 def filled_unit(unit):
-    # REVIEW: every optional key is written out with its default; ty stays out when absent.
     out = {"n": unit["n"], "a": unit["a"], "w": unit.get("w", 60), "c": unit.get("c", 300), "io": {}}
     if "ty" in unit:
         out["ty"] = unit["ty"]
@@ -43,7 +41,6 @@ def unit_hash(unit):
 
 
 def root_hash(cfg):
-    # REVIEW: v is not part of the root hash; units contribute their 8-character hash.
     root = {
         "cu": cfg.get("cu", {}),
         "gps": cfg.get("gps", 0),

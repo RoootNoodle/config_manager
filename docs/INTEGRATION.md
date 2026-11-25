@@ -33,7 +33,7 @@ The firmware changes are listed in V2_PLAN.md section 10. Per call site:
 
 | v1 | v2 |
 |---|---|
-| `version: v1.0.0` in `main/idf_component.yml` | `version: v2.0.0` |
+| `version: v1.0.0` in `main/idf_component.yml` | `version: v2.0.1` |
 | `config_manager_handle_partial_update(json)` (`cfg/update`, BLE, auto-addressing) | `config_manager_apply_patch(json)` on `v2/cfg/set`, then publish `config_manager_build_state(false)` on `v2/cfg/state`. It returns `esp_err_t`, not `bool`. |
 | `config_manager_delete_unit(key)` | a patch `{"v":N,"u":{"3":null}}` |
 | `config_manager_handle_sync(json)` returning `true` -> `cfg/hello` | same call on `v2/cfg/sync`; on `true` publish `config_manager_build_state(true)` |

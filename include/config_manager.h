@@ -12,7 +12,6 @@
 extern "C" {
 #endif
 
-// REVIEW: schema v2 (docs/V2_PLAN.md); the component major version follows it.
 #define CONFIG_MANAGER_SCHEMA_VERSION 2
 
 #define MAX_UNITS           CONFIG_CONFIG_MANAGER_MAX_UNITS
@@ -27,7 +26,16 @@ typedef enum {
     IO_VTYPE_INT32,
     IO_VTYPE_FP32,
     IO_VTYPE_BOOL,
+    IO_VTYPE_FP64,
 } io_value_type_t;
+
+// Byte order of a multi-byte value; A is the most significant byte. Names are for 32 bits, 64-bit values follow the same rule per word.
+typedef enum {
+    IO_ORDER_ABCD = 0, // "b": big endian
+    IO_ORDER_DCBA,     // "l": all bytes reversed
+    IO_ORDER_CDAB,     // "ws": word order reversed, bytes in each word big endian
+    IO_ORDER_BADC,     // "bs": bytes swapped in each word, word order kept
+} io_byte_order_t;
 
 typedef struct {
     char            name[MAX_NAME_LEN];
@@ -37,7 +45,7 @@ typedef struct {
     uint8_t         start_byte;
     uint8_t         length;
     io_value_type_t value_type;
-    bool            big_endian;
+    io_byte_order_t byte_order;
     float           live_value;   // NAN until first read
 } io_config_t;
 
@@ -47,7 +55,6 @@ typedef struct {
 } configure_unit_t;
 
 typedef struct {
-    // REVIEW: name[40] is gone on purpose so code matching it against topics or rules fails to compile.
     uint8_t  key;                 // the unit key, "1"-"255" in the file
     uint8_t  address;
     uint16_t wifi_interval_s;
@@ -77,7 +84,6 @@ typedef struct {
 // Lifecycle
 esp_err_t config_manager_init(void);
 esp_err_t config_manager_deinit(void);
-// REVIEW: missing file -> factory default written; unreadable/invalid file -> default in RAM only, file kept, ESP_OK.
 esp_err_t config_manager_load(void);
 
 /**
@@ -121,7 +127,6 @@ cJSON      *config_manager_get_config_json(void);          // from file (or the 
  * @param key "name" or "device_ID".
  * @return The string, or NULL for an unknown key or when no config is loaded.
  */
-// REVIEW: kept for existing callers; unsafe without the lock, so the docblock points to the copy function.
 const char *config_manager_get_string(const char *key);
 
 /**
@@ -268,7 +273,6 @@ esp_err_t config_manager_set_live_value(uint8_t unit_key, const char *io_name, f
  */
 esp_err_t config_manager_get_live_value(uint8_t unit_key, const char *io_name, float *out);
 
-// REVIEW: index-based variants unchanged; an index from find_unit() is only valid while the caller holds config_manager_lock().
 // Live values by index into units[]; only valid while the caller holds config_manager_lock() across
 // config_manager_find_unit() and this call. New code should use the key-based functions above.
 esp_err_t config_update_live_value(const char *io_name, uint8_t unit_idx, float new_val);

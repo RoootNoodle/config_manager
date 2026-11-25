@@ -109,7 +109,7 @@
         },
         "t": {
           "description": "Value type",
-          "enum": ["u16", "i16", "u32", "i32", "f32", "bool"]
+          "enum": ["u16", "i16", "u32", "i32", "f32", "f64", "bool"]
         },
         "f": {
           "type": "array",
@@ -131,19 +131,19 @@
         },
         "b": {
           "type": "integer",
-          "description": "Start byte. Default 0.",
+          "description": "Start byte: position of the value in the Modbus response (slave = 0, function code = 1, byte count = 2, first data byte = 3). 0-3 all mean the first data byte. Default 0.",
           "minimum": 0,
           "maximum": 255
         },
         "l": {
           "type": "integer",
-          "description": "Length in bytes. Default 2 for 16-bit types and bool, 4 for 32-bit types.",
+          "description": "Length in bytes. Default 2 for 16-bit types and bool, 4 for 32-bit types, 8 for f64.",
           "minimum": 1,
           "maximum": 8
         },
         "e": {
-          "description": "\"l\" little-endian, \"b\" big-endian. Default big-endian.",
-          "enum": ["l", "b"]
+          "description": "Byte order, A = most significant byte: \"b\" ABCD (big endian), \"l\" DCBA (all bytes reversed), \"ws\" CDAB (word order reversed), \"bs\" BADC (bytes swapped in each word). 64-bit values follow the same rule per 16-bit word. Default \"b\".",
+          "enum": ["b", "l", "ws", "bs"]
         }
       }
     }

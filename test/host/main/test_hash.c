@@ -4,7 +4,6 @@
 #include "unity_fixture.h"
 #include "test_helpers.h"
 
-// REVIEW: golden values from test/hash_reference.py (plan section 5) over schemas/v2/config_example.json.
 #define H_ROOT    "eee9ed4c"
 #define H_UNIT_1  "e9193bf6"
 #define H_UNIT_2  "a9f85125"
@@ -18,6 +17,13 @@
 #define C2_ROOT    "02ca0ec3"
 #define C2_UNIT_10 "73357223"
 #define C2_UNIT_2  "5dcf6d80"
+
+#define C3_JSON "{\"s\":2,\"v\":1,\"id\":\"d\",\"n\":\"g\",\"u\":{\"11\":{\"n\":\"Meter\",\"a\":11,\"io\":{" \
+                "\"total\":{\"r\":13,\"t\":\"f32\",\"f\":[4],\"e\":\"ws\"}," \
+                "\"total64\":{\"r\":4,\"t\":\"f64\",\"f\":[4,16],\"e\":\"ws\"}," \
+                "\"status\":{\"r\":8,\"t\":\"u32\",\"f\":[3],\"e\":\"bs\"}}}}}"
+#define C3_ROOT    "5a3f729e"
+#define C3_UNIT_11 "fa329295"
 
 TEST_GROUP(hash);
 
@@ -51,6 +57,12 @@ TEST(hash, matches_python_reference)
     TEST_ASSERT_EQUAL_UINT8(2, cfg->units[0].key);
     assert_hex(C2_UNIT_2, cfg->units[0].hash);
     assert_hex(C2_UNIT_10, cfg->units[1].hash);
+    config_manager_release();
+
+    TEST_ASSERT_EQUAL(ESP_OK, config_manager_save(C3_JSON));
+    cfg = config_manager_get_ptr();
+    assert_hex(C3_ROOT, cfg->hash);
+    assert_hex(C3_UNIT_11, cfg->units[0].hash);
     config_manager_release();
 }
 

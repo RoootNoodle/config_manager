@@ -1,5 +1,4 @@
-# REVIEW: major version follows CONFIG_MANAGER_SCHEMA_VERSION (2).
-version: "2.0.0"
+version: "2.0.1"
 description: Versioned gateway configuration (schema v2) for MIOT gateways - parse, merge patch, hashes, state/sync/get payloads, quotas, live values
 url: https://github.com/RoootNoodle/config_manager
 targets:
