@@ -3,65 +3,87 @@
 | Schema | Component versions | Files |
 |---|---|---|
 | v1 | 1.x.y | `schemas/v1/config.schema.json`, `schemas/v1/config_example.json` |
+| v2 | 2.x.y | `schemas/v2/config.schema.json`, `schemas/v2/config_example.json` |
 
 The rules:
 - A component release parses exactly one schema version. That number is `CONFIG_MANAGER_SCHEMA_VERSION` in `config_manager.h`, and it equals the major version in `idf_component.yml`.
-- `config_version` inside `config.json` is the *data* version. The server bumps it on every change, and it has nothing to do with the schema version.
+- `v` inside the config file is the *data* version. The server bumps it on every change, and it has nothing to do with the schema version (`s`).
 - **Files in `schemas/vN/` are frozen once vN is released.** Fix a typo in a description as a patch release. Never change the meaning of a field within a version.
 
-## v1: what the parser does with each field
+The design, the MQTT messages and the reasons behind v2 are in [V2_PLAN.md](V2_PLAN.md).
 
-`test/schema_check.py` enforces this table: every schema property must be either parsed or listed as pass-through.
+## v2: the file
 
-| Level | Parsed into `system_config_t` | Kept in the file only (pass-through) |
+```json
+{"s":2,"v":8,"id":"8574…","n":"MIOT-Gateway","gps":0,
+ "cu":{"MIOT_Level_Sensor":298},
+ "u":{"1":{"n":"Level Sensor","ty":"MIOT_Level_Sensor","a":10,"w":5,"c":300,
+           "io":{"level":{"r":100,"t":"f32","f":[3]}}}}}
+```
+
+`test/schema_check.py` checks that every key in the schema is read by `src/config_manager.c`. v2 has no pass-through fields: a key is either parsed or rejected.
+
+| Level | Key | Meaning | Default | Parsed into |
+|---|---|---|---|---|
+| root | `s` | schema version, always 2 | required | |
+| root | `v` | config version, whole number >= 0 | required | `version` |
+| root | `id` | device ID; no `/`, `+`, `#` or control characters | required | `device_id` (truncated to 39 bytes) |
+| root | `n` | gateway name, at most 39 bytes | required | `name` |
+| root | `gps` | 0 or 1 | 0 | `gps_enabled` |
+| root | `cu` | sensor type -> register 0–65535 | empty | `configure_units[]` (sorted by name, type truncated to 39 bytes) |
+| root | `u` | units, keyed `"1"`–`"255"` (no leading zero) | required | `units[]`, sorted by key |
+| unit | `n` | unit name | required | not kept in RAM |
+| unit | `ty` | sensor type | none | not kept in RAM |
+| unit | `a` | Modbus address 2–247 | required | `address` |
+| unit | `w` | WiFi interval, seconds, 1–65535 | 60 | `wifi_interval_s` |
+| unit | `c` | NB-IoT interval, seconds, 1–65535 | 300 | `nbiot_interval_s` |
+| unit | `io` | IOs; the key is the name, 1–31 bytes, no `/`, `+`, `#` or control characters (0x00–0x1F, 0x7F) | required (may be empty) | `io_pool[]`, sorted by name |
+| IO | `r` | register 0–65535 | required | `read_addr` |
+| IO | `t` | `u16` `i16` `u32` `i32` `f32` `f64` `bool` | required | `value_type` |
+| IO | `f` | one read code (1–4), one write code (5, 6, 15, 16), or one of each | required | `read_fc`, `write_fc` |
+| IO | `b` | start byte 0–255: position of the value in the Modbus response (slave = 0, FC = 1, byte count = 2, first data byte = 3); 0–3 all mean the first data byte | 0 | `start_byte` |
+| IO | `l` | length 1–8 | 2 for 16-bit and `bool`, 4 for 32-bit, 8 for `f64` | `length` |
+| IO | `e` | byte order: `"b"` ABCD (big endian), `"l"` DCBA (all bytes reversed), `"ws"` CDAB (word order reversed), `"bs"` BADC (bytes swapped in each word) | `"b"` | `byte_order` |
+
+Also rejected: unknown keys at any level, duplicate keys in one object, numbers that are not whole, and a file over the quotas below.
+
+**Quotas** (Kconfig; reported in `v2/caps` by `config_manager_build_limits()`):
+
+| Setting | Default | Over the limit |
 |---|---|---|
-| root | `config_version`, `device_ID`, `name`, `units`, `configure_units` | `MQTT_URL`, `OTA_URL`, `gps_enabled` |
-| unit | `unit_address`, `unit_wifi_interval`, `unit_NB-IOT_interval`, `IO_config` (the JSON key becomes `unit_config_t.name`) | `unit_name`, `unit_default_address`, `unit_manufacturer`, `unit_type` |
-| IO | `IO_function_code`, `IO_read_address`, `IO_start_byte`, `IO_length`, `IO_value_type`, `IO_name`, `IO_endian` | `IO_unit`, `min`, `max`, `accuracy` |
-
-Pass-through fields are still part of the unit and system hashes. They are returned by `config_manager_get_config_json()`, `get_unit_json()` and `get_units_payload()`.
-
-**`IO_function_code`** follows the schema:
-- Read codes 1–4 set `read_fc`. Write codes 5, 6, 15 and 16 set `write_fc`.
-- `[6]` is write-only, `[3, 6]` is read + write.
-- **Omitted:** FC3 read + FC6 write.
-- **Legacy `IO_type`** (`"R"`, `"W"`, or a number) is only used when `IO_function_code` is absent. Configs written for the old firmware therefore keep their meaning.
-- An array with no valid code is treated as omitted, with a warning in the log.
-
-**Accepted beyond the schema:**
-- `IO_value_type` `"FLOAT32"` (read as FP32) and `"BOOL"`.
-- An unknown or missing type is read as UINT16.
-- An IO named `Set_Address` is skipped. It is the unit-addressing register, not a reading.
-
-**Defaults when a field is missing:**
-
-| Field | Default |
-|---|---|
-| `unit_wifi_interval` | 60 |
-| `unit_NB-IOT_interval` | 300 |
-| `IO_length` | 2 |
-| `IO_endian` | big |
-
-**Limits:**
-- Units beyond `CONFIG_CONFIG_MANAGER_MAX_UNITS` (default 15) are ignored.
-- configure_units entries beyond `..._MAX_CONFIGURE_UNITS` (default 20) are ignored.
-- Names are truncated to 39 characters.
+| `CONFIG_MANAGER_MAX_UNITS` | 15 | rejected, `ESP_ERR_INVALID_SIZE` / `"err":"q"` |
+| `CONFIG_MANAGER_MAX_IOS` | 100 | same |
+| `CONFIG_MANAGER_MAX_CONFIGURE_UNITS` | 20 | same |
+| `CONFIG_MANAGER_MAX_FILE_SIZE` | 4800 B of compact JSON | same |
 
 ## Hashes
 
-Each hash is the SHA-256 (lowercase hex) of `cJSON_PrintUnformatted`, with object keys sorted by `strcmp` at every level and UTF-8 kept as-is:
+A hash is the first 8 lowercase hex characters (the first 4 bytes, `uint32_t` in RAM) of SHA-256 over:
 
-| Hash | Computed over |
+1. The object with every optional key filled in with its default (`w`, `c`, `b`, `l`, `e` as `"b"`, `gps`). `ty` is left out when absent.
+2. Keys sorted by byte order at every level; `f` sorted ascending.
+3. Compact JSON, UTF-8 kept as-is.
+
+| Hash | Taken over |
 |---|---|
-| unit | one unit object |
-| system | the whole config |
-| configure_units | the configure_units object |
+| unit | the unit object |
+| root | `{"cu":{…},"gps":0,"id":"…","n":"…","s":2,"u":{"<key>":"<unit hash>",…}}`; `v` is not part of it |
 
-In Python, the equivalent is `json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)`. The host tests pin all of these against values computed that way.
+The library streams this text into SHA-256 without building it in RAM. `test/hash_reference.py` is the Python reference, and the host tests pin its values.
 
-## Releasing a new layout (v2)
+## v1 files on a v2 gateway
 
-1. Add `schemas/v2/config.schema.json` and `config_example.json`. Leave `schemas/v1/` untouched.
-2. Update the parser, `CONFIG_MANAGER_SCHEMA_VERSION` (2), `SCHEMA_VERSION` and `FIELDS` in `test/schema_check.py`, and `EXAMPLE_JSON` / the tests.
-3. Decide how a device on v2 firmware treats a v1 file still on flash (migrate on load, or reject). Write that down in this file.
-4. Bump the major version in `idf_component.yml`, add a CHANGELOG entry, and tag `v2.0.0`.
+The library does not convert v1 files. v2 uses its own path (`CONFIG_MANAGER_FILE_PATH`, default `/spiffs/config_v2.json`), so the v1 file stays untouched until a v2 config arrives:
+
+1. With no v2 file, `config_manager_load()` writes the factory default `{"s":2,"v":0,"id":"","n":"MIOT-Gateway","u":{}}`. Call `config_manager_reset_to_default(id)` to put the device ID in.
+2. The server sends the converted config (V2_PLAN.md section 6) on `v2/cfg/set`.
+3. After a v2 config from `config_manager_save()` or `config_manager_apply_patch()` is written and loaded, the file at `CONFIG_MANAGER_V1_FILE_PATH` is deleted (empty disables this). Writing the factory default does not delete it.
+
+A v1 file given to `config_manager_save()`, or found at the v2 path, is rejected.
+
+## Releasing a new layout (v3)
+
+1. Add `schemas/v3/config.schema.json` and `config_example.json`. Leave older folders untouched.
+2. Update the parser, `CONFIG_MANAGER_SCHEMA_VERSION`, `SCHEMA_VERSION` and `FIELDS` in `test/schema_check.py`, `test/hash_reference.py` if the hash changes, and the tests.
+3. Decide how a device treats the previous file still on flash. Write that down in this file.
+4. Bump the major version in `idf_component.yml`, add a CHANGELOG entry, and tag the release.

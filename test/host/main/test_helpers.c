@@ -10,6 +10,7 @@ void test_env_setup(void)
 {
     mkdir(TEST_DIR, 0755);
     remove(CONFIG_MANAGER_FILE_PATH);
+    remove(CONFIG_MANAGER_V1_FILE_PATH);
     TEST_ASSERT_EQUAL(ESP_OK, config_manager_init());
 }
 
@@ -32,6 +33,14 @@ char *read_text_file(const char *path)
     return buf;
 }
 
+void write_text_file(const char *path, const char *text)
+{
+    FILE *f = fopen(path, "w");
+    TEST_ASSERT_NOT_NULL_MESSAGE(f, path);
+    fputs(text, f);
+    fclose(f);
+}
+
 void load_example(void)
 {
     char *json = read_text_file(EXAMPLE_JSON);
@@ -40,14 +49,24 @@ void load_example(void)
     free(json);
 }
 
-const io_config_t *find_io(const system_config_t *cfg, const char *unit, const char *io)
+const io_config_t *find_io(const system_config_t *cfg, uint8_t unit_key, const char *io)
 {
     for (int u = 0; u < cfg->unit_count; u++) {
-        if (strcmp(cfg->units[u].name, unit) != 0) continue;
+        if (cfg->units[u].key != unit_key) continue;
         for (int i = 0; i < cfg->units[u].io_count; i++) {
             const io_config_t *p = &cfg->io_pool[cfg->units[u].io_pool_offset + i];
             if (strcmp(p->name, io) == 0) return p;
         }
     }
     return NULL;
+}
+
+const char *state_str(const cJSON *state, const char *key)
+{
+    return cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(state, key));
+}
+
+const char *state_unit(const cJSON *state, const char *unit_key)
+{
+    return cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(state, "u"), unit_key));
 }

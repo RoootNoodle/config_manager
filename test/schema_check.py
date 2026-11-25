@@ -15,22 +15,21 @@ import sys
 import jsonschema
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Per schema level: fields read by the C parser / fields only stored in the JSON file
 FIELDS = {
     "root": {
-        "parsed": {"config_version", "device_ID", "name", "units", "configure_units"},
-        "passthrough": {"MQTT_URL", "OTA_URL", "gps_enabled"},
+        "parsed": {"s", "v", "id", "n", "gps", "cu", "u"},
+        "passthrough": set(),
     },
     "unit": {
-        "parsed": {"unit_address", "unit_wifi_interval", "unit_NB-IOT_interval", "IO_config"},
-        "passthrough": {"unit_name", "unit_default_address", "unit_manufacturer", "unit_type"},
+        "parsed": {"n", "ty", "a", "w", "c", "io"},
+        "passthrough": set(),
     },
     "io": {
-        "parsed": {"IO_function_code", "IO_read_address", "IO_start_byte", "IO_length",
-                   "IO_value_type", "IO_name", "IO_endian"},
-        "passthrough": {"IO_unit", "min", "max", "accuracy"},
+        "parsed": {"r", "t", "f", "b", "l", "e"},
+        "passthrough": set(),
     },
 }
 
@@ -56,6 +55,19 @@ def main():
             continue
         for e in validator.iter_errors(json.loads(path.read_text())):
             errors.append(f"{label}: {'/'.join(map(str, e.path)) or '<root>'}: {e.message}")
+
+    example = json.loads((schema_dir / "config_example.json").read_text())
+    must_fail = {}
+    for bad in ["a/b", "a+b", "a#", "a\tb", "a\u007fb"]:
+        doc = json.loads(json.dumps(example))
+        doc["u"]["1"]["io"][bad] = {"r": 1, "t": "u16", "f": [3]}
+        must_fail[f"IO name {bad!r}"] = doc
+        doc = json.loads(json.dumps(example))
+        doc["id"] = bad
+        must_fail[f"id {bad!r}"] = doc
+    for label, doc in must_fail.items():
+        if validator.is_valid(doc):
+            errors.append(f"schema accepts {label}, which the firmware rejects")
 
     levels = {
         "root": schema["properties"],
